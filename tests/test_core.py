@@ -713,3 +713,82 @@ class TestEvmMultiChainImport:
         assert "secrets-form" not in html
         assert "Live Trading (Phase 2)" not in html
         assert "btn-mode-paper" in html and "btn-mode-real" in html
+
+
+class TestUserTestGaps:
+    def test_wallet_balances_endpoint_unconfigured(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: False)
+        c = TestClient(srv.app)
+        r = c.get("/api/wallet/balances")
+        assert r.status_code == 200
+        assert r.json()["configured"] is False
+
+    def test_wallet_balances_valued_from_prices(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        import memicoin_core.onchain as oc
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has",
+                            lambda k: k == "onchain_private_key")
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "arc": {"native_symbol": "USDC", "native": 12.0,
+                        "tokens": [{"symbol": "CIRBTC", "contract": "0x171", "balance": 2.0}]}
+            }}, "solana": None})
+        monkeypatch.setattr(srv.market, "get_prices",
+                            lambda force=False: {"USDC": 1.0, "CIRBTC": 83000.0})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        c = TestClient(srv.app)
+        r = c.get("/api/wallet/balances")
+        d = r.json()
+        assert d["configured"] is True
+        assert d["total_usd"] == pytest.approx(12.0 + 166000.0)
+        arc = d["chains"]["arc"]
+        assert arc[0]["symbol"] == "USDC" and arc[0]["value_usd"] == pytest.approx(12.0)
+        assert arc[1]["symbol"] == "CIRBTC" and arc[1]["value_usd"] == pytest.approx(166000.0)
+
+    def test_emergency_real_mode_reports_unliquidatable(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        import memicoin_core.onchain as oc
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has",
+                            lambda k: k == "onchain_private_key")
+        c0 = load_constraints(db)
+        c0.paper_trading = False
+        db.set_setting("constraints", c0.to_json())
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "arc": {"native_symbol": "USDC", "native": 5.0,
+                        "tokens": [{"symbol": "CIRBTC", "contract": "0x171", "balance": 1.0}]}
+            }}, "solana": None})
+        c = TestClient(srv.app)
+        r = c.post("/api/emergency-to-stablecoin")
+        d = r.json()
+        assert d["mode"] == "real"
+        res = d["results"][0]
+        assert res["ok"] is False and "no DEX router" in res["error"]  # honest failure
+
+    def test_setup_status_booleans_only(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        c = TestClient(srv.app)
+        d = c.get("/api/setup-status").json()
+        assert d["mistral_key"] is False
+        assert isinstance(d["wallet"], bool)
+
+    def test_latest_cycle_endpoint(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        assert c.get("/api/cycles/latest").json() == {}
+        cid = db.start_cycle()
+        db.finish_cycle(cid, "completed", "in", "out", summary="s")
+        d = c.get("/api/cycles/latest").json()
+        assert d["id"] == cid and d["status"] == "completed"

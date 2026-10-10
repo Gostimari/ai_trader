@@ -13,6 +13,8 @@
   <div id="status-badges"></div>
 </header>
 
+<div id="setup-hint" class="setup-hint hidden"></div>
+<div id="cycle-banner" class="banner hidden"></div>
 <div class="disclaimer">
   ⚠️ Meme coins are extremely volatile. This software does not guarantee profit.
   Paper-trading mode simulates trades against real market data with virtual funds.
@@ -22,6 +24,7 @@
   <button data-tab="portfolio" class="tab active">Portfolio</button>
   <button data-tab="decisions" class="tab">Decision Feed</button>
   <button data-tab="settings" class="tab">Goals &amp; Constraints</button>
+  <button data-tab="wallet" class="tab">My Wallet</button>
   <button data-tab="news" class="tab">News</button>
 </nav>
 
@@ -125,6 +128,12 @@
       <div id="watchlist-status" class="hint"></div>
       <button type="submit">Save watchlist</button>
     </form>
+  </section>
+
+  <section id="wallet" class="panel">
+    <div class="cards" id="wallet-cards"></div>
+    <p class="hint" id="wallet-hint"></p>
+    <div id="wallet-balances"></div>
   </section>
 
   <section id="news" class="panel">

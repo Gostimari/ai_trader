@@ -193,6 +193,102 @@ function modeControls() {
   });
 }
 
+
+async function loadWalletBalances() {
+  const cards = $("#wallet-cards"), rowsEl = $("#wallet-balances"), hint = $("#wallet-hint");
+  if (!cards) return;
+  try {
+    const w = await api("/api/wallet/balances");
+    if (!w.configured) {
+      cards.innerHTML = "";
+      rowsEl.innerHTML = "";
+      hint.textContent = "No wallet imported. Go to Settings \u00b7 3 Wallet to import your key.";
+      return;
+    }
+    const all = Object.entries(w.chains).flatMap(([chain, rows]) =>
+      rows.map((r) => ({ ...r, chain })));
+    const total = w.total_usd;
+    cards.innerHTML = `
+      <div class="card"><div class="k">Wallet total</div><div class="v">$${fmt(total)}</div></div>
+      <div class="card"><div class="k">Chains with funds</div><div class="v">${Object.keys(w.chains).length}</div></div>
+      <div class="card"><div class="k">Tokens found</div><div class="v">${all.length}</div></div>`;
+    hint.textContent = w.priced
+      ? "Valued via DexScreener prices. Tokens with no DexScreener pair show as $0 \u2014 add their contract to the Watchlist to price them."
+      : "Market data unavailable \u2014 balances shown without USD valuation.";
+    if (!all.length) {
+      rowsEl.innerHTML = "<p class='hint'>No balances found on any chain.</p>";
+      return;
+    }
+    rowsEl.innerHTML = `<table><thead><tr><th>Chain</th><th>Token</th><th>Balance</th><th>Value $</th></tr></thead><tbody>` +
+      all.sort((a, b) => b.value_usd - a.value_usd).map((r) => `
+        <tr><td>${r.chain}</td><td>${r.symbol}${r.contract ? ` <span class="hint">${r.contract.slice(0, 8)}\u2026</span>` : ""}</td>
+        <td>${fmt(r.balance, 6)}</td><td>$${fmt(r.value_usd)}</td></tr>`).join("") +
+      `</tbody></table>`;
+  } catch (e) {
+    hint.textContent = "Failed to read wallet: " + e.message;
+  }
+}
+
+function initWalletTab() {
+  document.querySelectorAll(".tab").forEach((t) =>
+    t.addEventListener("click", () => {
+      if (t.dataset.tab === "wallet") loadWalletBalances();
+    }));
+}
+
+
+let lastSeenCycleId = null;
+
+async function pollCycles() {
+  try {
+    const cy = await api("/api/cycles/latest");
+    if (!cy || !cy.id || cy.id === lastSeenCycleId) return;
+    const isFirstLoad = lastSeenCycleId === null;
+    lastSeenCycleId = cy.id;
+    if (isFirstLoad) return; // don't notify for old cycles on page load
+    const ok = cy.status === "completed";
+    const msg = ok
+      ? `Decision cycle finished: ${cy.analysis_summary || "see Decision Feed"}`
+      : `Decision cycle ${cy.status}: ${cy.error || "check the Decision Feed"}`;
+    const banner = $("#cycle-banner");
+    if (banner) {
+      banner.textContent = msg;
+      banner.className = ok ? "banner ok" : "banner err";
+      banner.classList.remove("hidden");
+      setTimeout(() => banner.classList.add("hidden"), 30000);
+    }
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("MemeCoin AI Trader", { body: msg });
+    }
+    loadState(); loadDecisions();
+  } catch (e) { /* silent */ }
+}
+
+function initCyclePolling() {
+  if ("Notification" in window && Notification.permission === "default") {
+    Notification.requestPermission();
+  }
+  pollCycles();
+  setInterval(pollCycles, 60000);
+}
+
+
+async function checkSetup() {
+  try {
+    const s = await api("/api/setup-status");
+    const el = $("#setup-hint");
+    if (!s.mistral_key) {
+      el.innerHTML = "⚠️ No AI key configured: the app cannot make decisions. " +
+        "Get a key at console.mistral.ai, then put <code>MISTRAL_API_KEY=...</code> in the " +
+        "<code>.env</code> file next to the app and restart it.";
+      el.classList.remove("hidden");
+    } else if (!s.wallet && !s.paper_trading) {
+      el.textContent = "Real-money mode is on but no wallet is imported — trading will fail until you import a key in Settings.";
+      el.classList.remove("hidden");
+    }
+  } catch (e) { /* ignore */ }
+}
+
 async function loadWatchlist() {
   try {
     const w = await api("/api/watchlist");
@@ -220,6 +316,9 @@ async function main() {
   loadWalletStatus();
   loadWatchlist();
   refreshModeUI();
+  initWalletTab();
+  initCyclePolling();
+  checkSetup();
   await Promise.all([loadState(), loadDecisions(), loadNews()]);
   setInterval(loadState, 60000);
 }

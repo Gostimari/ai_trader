@@ -330,3 +330,69 @@ def wallet_for(chain: str, secrets: SecretStore):
     if chain == "ton":
         raise RuntimeError("TON support is not enabled yet (untestable swap path)")
     raise RuntimeError(f"unsupported chain: {chain}")
+
+
+# ---------------------------------------------------------------------------
+# Wallet balance reading (real-money mode): native + token balances per chain
+# ---------------------------------------------------------------------------
+# Token lists are intentionally minimal and hardcoded to well-known assets.
+# Discovering arbitrary tokens requires an indexer API (per-chain, key-based);
+# the watchlist covers everything else the user explicitly tracks.
+# Only contracts verified from official docs are listed. Unknown/unverified
+# addresses must never be hardcoded here - the watchlist (user-supplied,
+# DexScreener-indexed) covers additional tokens.
+EVM_TOKENS = {
+    "arc": [("CIRBTC", "0x171a4217b86a807a64eb94757db6849fb4bdbaa0", 18)],
+}
+# Arc quirk: USDC is the native gas token there (18 decimals) - read as native.
+
+
+def read_wallet_balances(secrets: SecretStore, chains: list[str] | None = None) -> dict:
+    """Read native + known token balances for the imported wallet.
+
+    Returns {'evm': {'address': .., 'chains': {chain: {'native': x, 'tokens': [... KW..]}}},
+             'solana': {...}, 'error': optional}
+    Native symbol is per chain (ETH/MATIC/BNB/USDC-on-Arc/SOL).
+    """
+    out: dict = {"evm": None, "solana": None}
+    if secrets.has("onchain_private_key"):
+        evm = {"address": None, "chains": {}}
+        try:
+            from web3 import Web3
+            acct = Web3().eth.account.from_key(secrets.get("onchain_private_key"))
+            evm["address"] = acct.address
+            target = chains or list(EVM_CHAINS)
+            for chain in target:
+                if chain not in EVM_CHAINS:
+                    continue
+                w = EVMWallet(secrets, chain)
+                native_sym = EVM_CHAINS[chain].get("native_symbol", "ETH")
+                entry = {"native_symbol": native_sym, "native": 0.0, "tokens": []}
+                try:
+                    entry["native"] = w.native_balance()
+                except Exception:
+                    pass
+                for sym, addr, decimals in EVM_TOKENS.get(chain, []):
+                    try:
+                        bal = w.erc20_balance(addr)
+                        if bal and bal > 0:
+                            entry["tokens"].append({"symbol": sym, "contract": addr,
+                                                    "balance": bal})
+                    except Exception:
+                        continue
+                evm["chains"][chain] = entry
+            out["evm"] = evm
+        except Exception as e:
+            out["error"] = str(e)
+    if secrets.has("onchain_solana_private_key"):
+        try:
+            sw = SolanaWallet(secrets)
+            sol = {"address": sw.address(), "native": 0.0, "tokens": []}
+            try:
+                sol["native"] = sw.native_balance()
+            except Exception:
+                pass
+            out["solana"] = sol
+        except Exception as e:
+            out["error"] = str(e)
+    return out

@@ -41,3 +41,8 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 #news-list li { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; font-size: .9rem; }
 #news-list .src { color: var(--muted); font-size: .75rem; }
 #cycle-result { margin-top: 12px; font-size: .85rem; background: var(--panel); padding: 12px; border-radius: 8px; border: 1px solid var(--border); white-space: pre-wrap; }
+
+.banner { padding: 10px 22px; font-size: .85rem; border-bottom: 1px solid var(--border); }
+.banner.ok { background: #14351f; color: #7ee2a8; }
+.banner.err { background: #4a1f24; color: #ff9aa5; }
+.setup-hint { padding: 12px 22px; background: #3a2c14; color: #f0c674; font-size: .85rem; border-bottom: 1px solid var(--border); }
