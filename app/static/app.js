@@ -3,7 +3,9 @@ const fmt = (n, d = 2) => (n == null ? "—" : Number(n).toFixed(d));
 const pnlClass = (n) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
 
 async function api(path, body, method) {
-  const opts = body ? { method: method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {};
+  const opts = body !== undefined
+    ? { method: method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    : { method: method || "GET" };
   const r = await fetch(path, opts);
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
   return r.json();
@@ -80,7 +82,7 @@ function controls() {
     $("#btn-cycle").disabled = true;
     $("#cycle-result").textContent = "Running decision cycle…";
     try {
-      const r = await api("/api/cycle");
+      const r = await api("/api/cycle", {});
       $("#cycle-result").textContent =
         `Cycle ${r.status.toUpperCase()}\n` +
         (r.analysis_summary ? `AI: ${r.analysis_summary} (confidence: ${r.confidence})\n` : "") +
@@ -91,9 +93,9 @@ function controls() {
     } catch (e) { $("#cycle-result").textContent = "Failed: " + e.message; }
     $("#btn-cycle").disabled = false;
   });
-  $("#btn-pause").addEventListener("click", async () => { await api("/api/pause"); loadState(); });
+  $("#btn-pause").addEventListener("click", async () => { await api("/api/pause", {}); loadState(); });
   $("#btn-emergency").addEventListener("click", async () => {
-    if (confirm("Halt all trading immediately?")) { await api("/api/emergency-stop"); loadState(); }
+    if (confirm("Halt all trading immediately?")) { await api("/api/emergency-stop", {}); loadState(); }
   });
   $("#btn-stable").addEventListener("click", async () => {
     if (confirm("Sell ALL positions and convert to cash? This cannot be undone.")) {
@@ -101,10 +103,10 @@ function controls() {
     }
   });
   $("#btn-reset").addEventListener("click", async () => {
-    if (confirm("Reset paper portfolio to starting capital?")) { await api("/api/reset-paper"); loadState(); loadDecisions(); }
+    if (confirm("Reset paper portfolio to starting capital?")) { await api("/api/reset-paper", {}); loadState(); loadDecisions(); }
   });
   $("#btn-resume").addEventListener("click", async () => {
-    if (confirm("Re-enable trading after emergency stop/pause?")) { await api("/api/resume"); loadState(); }
+    if (confirm("Re-enable trading after emergency stop/pause?")) { await api("/api/resume", {}); loadState(); }
   });
   $("#autonomy_mode").addEventListener("change", () =>
     $("#full-control-warning").classList.toggle("hidden", $("#autonomy_mode").value !== "full_control"));
