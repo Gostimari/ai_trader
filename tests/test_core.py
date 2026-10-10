@@ -792,3 +792,87 @@ class TestUserTestGaps:
         db.finish_cycle(cid, "completed", "in", "out", summary="s")
         d = c.get("/api/cycles/latest").json()
         assert d["id"] == cid and d["status"] == "completed"
+
+
+class TestStablecoinLiquidationAndKey:
+    def test_stablecoin_targets_verified_addresses(self):
+        from memicoin_core.onchain import stablecoin_target, USDC_ADDRESSES, SOLANA_USDC_MINT
+        addr, label = stablecoin_target("ethereum")
+        assert addr == "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" and label == "USDC"
+        addr, label = stablecoin_target("base")
+        assert addr == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" and label == "USDC"
+        addr, label = stablecoin_target("arc")
+        assert label == "native USDC"
+        addr, label = stablecoin_target("binance-smart-chain")
+        assert label == "wrapped native (no verified USDC on this chain)"
+        assert SOLANA_USDC_MINT == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZ8nMYp7F"
+
+    def test_emergency_real_mode_targets_usdc(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        import memicoin_core.onchain as oc
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has",
+                            lambda k: k == "onchain_private_key")
+        c0 = load_constraints(db)
+        c0.paper_trading = False
+        db.set_setting("constraints", c0.to_json())
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "ethereum": {"native_symbol": "ETH", "native": 0.0,
+                             "tokens": [{"symbol": "PEPE", "contract": "0x698250814c", "balance": 100.0}]}
+            }}, "solana": None})
+        class _FakeW:
+            def __init__(self, s, c): self.cfg = {"router": "0xr"}
+            def swap_exact_tokens_for_tokens(self, a, b, amt):
+                return oc.TxResult(True, tx_id="0xtx", amount=amt)
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        c = TestClient(srv.app)
+        r = c.post("/api/emergency-to-stablecoin")
+        res = r.json()["results"][0]
+        assert res["ok"] is True and res["target"] == "USDC"
+
+    def test_mistral_key_stored_never_returned(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        monkeypatch.setattr(srv.secrets, "has",
+                            lambda k: k == "mistral_api_key")
+        c = TestClient(srv.app)
+        r = c.post("/api/mistral-key", json={"api_key": "secret-key-123"})
+        assert r.status_code == 200 and r.json()["configured"] is True
+        assert "secret-key-123" not in r.text
+        assert c.get("/api/setup-status").json()["mistral_key"] is True
+
+    def test_mistral_key_empty_removes(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        c = TestClient(srv.app)
+        r = c.post("/api/mistral-key", json={"api_key": "  "})
+        assert r.json()["configured"] is False
+
+    def test_engine_reads_key_from_store(self, db, monkeypatch):
+        c = Constraints()
+        class _Store:
+            def get(self, k): return "stored-key" if k == "mistral_api_key" else None
+            def has(self, k): return k == "mistral_api_key"
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews(),
+                                onchain_secrets=_Store())
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        # patch at the source the method imports from
+        import mistralai.client as msk
+        captured = {}
+        class _FakeMistral:
+            def __init__(self, api_key=None):
+                captured["key"] = api_key
+                raise RuntimeError("stop here")
+        monkeypatch.setattr(msk, "Mistral", _FakeMistral)
+        try:
+            engine._call_mistral("prompt")
+        except RuntimeError as e:
+            assert "stop here" in str(e)
+        assert captured.get("key") == "stored-key"

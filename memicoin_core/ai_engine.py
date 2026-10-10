@@ -178,10 +178,18 @@ class DecisionEngine:
         return "\n".join(parts)
 
     def _call_mistral(self, prompt: str) -> str:
-        from mistralai import Mistral
+        try:
+            from mistralai import Mistral
+        except ImportError:
+            from mistralai.client import Mistral
         api_key = os.environ.get("MISTRAL_API_KEY", "")
+        if not api_key and self._onchain_secrets is not None:
+            try:
+                api_key = self._onchain_secrets.get("mistral_api_key") or ""
+            except Exception:
+                pass
         if not api_key:
-            raise RuntimeError("MISTRAL_API_KEY not configured")
+            raise RuntimeError("Mistral API key not configured (set it in Settings or the .env file)")
         client = Mistral(api_key=api_key)
         model = os.environ.get("MISTRAL_MODEL", "mistral-small-latest")
         resp = client.chat.complete(

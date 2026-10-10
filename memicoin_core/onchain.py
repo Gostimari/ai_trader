@@ -347,6 +347,31 @@ EVM_TOKENS = {
 # Arc quirk: USDC is the native gas token there (18 decimals) - read as native.
 
 
+
+
+# Verified USDC addresses (Circle official deployments only).
+USDC_ADDRESSES = {
+    "ethereum": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "polygon": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+}
+# Arc: USDC is the native gas token — no contract needed.
+# BSC: no Circle-native USDC deployment; liquidation there falls back to
+# wrapped native (WBNB) and is labeled as such in the results.
+SOLANA_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZ8nMYp7F"
+
+
+def stablecoin_target(chain: str) -> tuple[str, str]:
+    """(address, label) of the stablecoin to liquidate into on this chain.
+    Falls back to the chain's wrapped native token where no verified
+    Circle USDC exists; the caller reports the label honestly."""
+    if chain == "arc":
+        return EVM_CHAINS["arc"]["native_symbol"], "native USDC"
+    if chain in USDC_ADDRESSES:
+        return USDC_ADDRESSES[chain], "USDC"
+    return EVM_CHAINS[chain]["weth"], "wrapped native (no verified USDC on this chain)"
+
+
 def read_wallet_balances(secrets: SecretStore, chains: list[str] | None = None) -> dict:
     """Read native + known token balances for the imported wallet.
 

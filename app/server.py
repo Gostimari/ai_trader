@@ -304,31 +304,42 @@ def emergency_to_stablecoin():
             prices = market.get_prices()
         except MarketDataError:
             prices = {}
-        from memicoin_core.onchain import read_wallet_balances
+        from memicoin_core.onchain import (EVM_CHAINS, EVMWallet, SolanaWallet,
+                                           SOLANA_USDC_MINT, read_wallet_balances,
+                                           stablecoin_target)
         raw = read_wallet_balances(secrets)
         evm = (raw.get("evm") or {}).get("chains") or {}
         for chain, entry in evm.items():
-            for t in entry.get("tokens", []):
-                if chain in EVM_CHAINS and EVM_CHAINS[chain].get("router"):
-                    w = EVMWallet(secrets, chain)
-                    native_addr = EVM_CHAINS[chain]["weth"]
-                    res = w.swap_exact_tokens_for_tokens(t["contract"], native_addr, t["balance"])
+            target_addr, target_label = stablecoin_target(chain)
+            if chain in EVM_CHAINS and EVM_CHAINS[chain].get("router"):
+                w = EVMWallet(secrets, chain)
+                for t in entry.get("tokens", []):
+                    res = w.swap_exact_tokens_for_tokens(t["contract"], target_addr, t["balance"])
                     results.append({"chain": chain, "symbol": t["symbol"], "ok": res.ok,
-                                    "tx_id": res.tx_id, "error": res.error})
-                else:
+                                    "tx_id": res.tx_id, "target": target_label,
+                                    "error": res.error})
+            else:
+                for t in entry.get("tokens", []):
                     results.append({"chain": chain, "symbol": t["symbol"], "ok": False,
+                                    "target": target_label,
                                     "error": "no DEX router on this chain — cannot liquidate automatically"})
-        if raw.get("solana") and raw["solana"].get("tokens"):
-            results.append({"chain": "solana", "symbol": "tokens", "ok": False,
-                            "error": "solana emergency liquidation not wired to Jupiter in this build"})
+        sol = raw.get("solana")
+        if sol and sol.get("tokens"):
+            sw = SolanaWallet(secrets)
+            for t in sol.get("tokens", []):
+                res = sw.swap(t.get("contract", t.get("mint", "")), SOLANA_USDC_MINT,
+                              t.get("balance", 0.0))
+                results.append({"chain": "solana", "symbol": t.get("symbol", "?"),
+                                "ok": res.ok, "tx_id": res.tx_id, "target": "USDC",
+                                "error": res.error})
         db.finish_cycle(cycle_id, "emergency", "", "",
-                        summary="Emergency liquidation (real mode)")
+                        summary="Emergency liquidation to stablecoins (real mode)")
         ok_all = all(r["ok"] for r in results) if results else True
         for r in results:
             db.add_decision({
                 "cycle_id": cycle_id, "action": "sell", "asset_in": r["symbol"],
                 "asset_out": "native", "status": "executed" if r["ok"] else "failed",
-                "reason": f"Emergency liquidation on {r['chain']}: {r['error'] or 'sold'}",
+                "reason": f"Emergency liquidation on {r['chain']} -> {r.get('target', 'stablecoin')}: {r['error'] or 'sold'}",
                 "tx_id": r.get("tx_id", ""),
             })
         return {"ok": ok_all, "mode": "real", "results": results}
@@ -382,7 +393,22 @@ def latest_cycle():
 def setup_status():
     """First-run guidance: which integrations are configured (booleans only)."""
     return {
-        "mistral_key": bool(os.environ.get("MISTRAL_API_KEY")),
+        "mistral_key": bool(os.environ.get("MISTRAL_API_KEY")) or secrets.has("mistral_api_key"),
         "wallet": secrets.has("onchain_private_key") or secrets.has("onchain_solana_private_key"),
         "paper_trading": load_constraints(db).paper_trading,
     }
+
+
+class MistralKeyPayload(BaseModel):
+    api_key: str
+
+
+@app.post("/api/mistral-key")
+def set_mistral_key(p: MistralKeyPayload):
+    """Store the Mistral API key encrypted. Never returned afterwards."""
+    key = p.api_key.strip()
+    if not key:
+        secrets.delete("mistral_api_key")
+        return {"ok": True, "configured": False}
+    secrets.set("mistral_api_key", key)
+    return {"ok": True, "configured": True}

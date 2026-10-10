@@ -279,14 +279,30 @@ async function checkSetup() {
     const el = $("#setup-hint");
     if (!s.mistral_key) {
       el.innerHTML = "⚠️ No AI key configured: the app cannot make decisions. " +
-        "Get a key at console.mistral.ai, then put <code>MISTRAL_API_KEY=...</code> in the " +
-        "<code>.env</code> file next to the app and restart it.";
+        "Go to Settings \u00b7 1b AI Provider Key and paste your Mistral key (console.mistral.ai).";
       el.classList.remove("hidden");
     } else if (!s.wallet && !s.paper_trading) {
       el.textContent = "Real-money mode is on but no wallet is imported — trading will fail until you import a key in Settings.";
       el.classList.remove("hidden");
     }
   } catch (e) { /* ignore */ }
+}
+
+
+function mistralKeyControls() {
+  $("#mistral-key-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const key = $("#mistral-key").value.trim();
+    if (!key) return alert("Paste the API key first, or submit empty after clearing to remove it.");
+    try {
+      const r = await api("/api/mistral-key", { api_key: key });
+      $("#mistral-key").value = "";
+      $("#mistral-key-status").textContent = r.configured
+        ? "\u2705 Key saved (encrypted). The AI can now run decision cycles."
+        : "Key removed.";
+      checkSetup();
+    } catch (e) { alert("Failed: " + e.message); }
+  });
 }
 
 async function loadWatchlist() {
@@ -311,6 +327,7 @@ async function main() {
   tabs();
   controls();
   modeControls();
+  mistralKeyControls();
   walletControls();
   watchlistControls();
   loadWalletStatus();

@@ -39,7 +39,7 @@
       <button id="btn-cycle">▶ Run decision cycle now</button>
       <button id="btn-pause">⏸ Pause/Resume</button>
       <button id="btn-emergency" class="danger">🛑 Emergency stop</button>
-      <button id="btn-stable" class="danger">💵 Convert all to cash</button>
+      <button id="btn-stable" class="danger">💵 Convert all to USDC (per chain)</button>
       <button id="btn-reset">↺ Reset paper portfolio</button>
       <button id="btn-resume" class="hidden">Re-enable trading</button>
     </div>
@@ -67,6 +67,17 @@
       Your constraints (max loss, position limits, allowed chains) still apply and are enforced in code,
       but real funds are at risk. DEX swaps are irreversible.
     </div>
+
+    <h3 style="margin-top:28px">1b · AI Provider Key</h3>
+    <p class="hint">The app needs a Mistral API key to make decisions. Paste it here — it is
+      stored encrypted on your machine, never displayed again. (Alternative: put
+      <code>MISTRAL_API_KEY</code> in the <code>.env</code> file.) Get a key at console.mistral.ai.</p>
+    <form id="mistral-key-form">
+      <label>Mistral API key
+        <input type="password" id="mistral-key" autocomplete="off" placeholder="paste key and save"></label>
+      <div id="mistral-key-status" class="hint"></div>
+      <button type="submit">Save key (encrypted)</button>
+    </form>
 
     <h3 style="margin-top:28px">2 · Constraints for the AI</h3>
     <p class="hint">Hard limits enforced in code on every action — the AI cannot break these.</p>
