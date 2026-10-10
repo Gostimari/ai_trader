@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MemeCoin AI Trader</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>🐕 MemeCoin AI Trader</h1>
+  <div id="mode-badge" class="badge">PAPER TRADING</div>
+  <div id="status-badges"></div>
+</header>
+
+<div class="disclaimer">
+  ⚠️ Meme coins are extremely volatile. This software does not guarantee profit.
+  Paper-trading mode simulates trades against real market data with virtual funds.
+</div>
+
+<nav>
+  <button data-tab="portfolio" class="tab active">Portfolio</button>
+  <button data-tab="decisions" class="tab">Decision Feed</button>
+  <button data-tab="market" class="tab">Market</button>
+  <button data-tab="settings" class="tab">Goals &amp; Constraints</button>
+  <button data-tab="news" class="tab">News</button>
+</nav>
+
+<main>
+  <section id="portfolio" class="panel active">
+    <div class="cards" id="portfolio-cards"></div>
+    <table id="positions-table">
+      <thead><tr><th>Asset</th><th>Chain</th><th>Qty</th><th>Value $</th><th>P&L $</th><th>P&L %</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="controls">
+      <button id="btn-cycle">▶ Run decision cycle now</button>
+      <button id="btn-pause">⏸ Pause/Resume</button>
+      <button id="btn-emergency" class="danger">🛑 Emergency stop</button>
+      <button id="btn-stable" class="danger">💵 Convert all to cash</button>
+      <button id="btn-reset">↺ Reset paper portfolio</button>
+      <button id="btn-resume" class="hidden">Re-enable trading</button>
+    </div>
+    <div id="cycle-result"></div>
+  </section>
+
+  <section id="decisions" class="panel">
+    <p class="hint">Every AI decision — executed or rejected — with the reason why. Full transparency.</p>
+    <table id="decisions-table">
+      <thead><tr><th>Time</th><th>Action</th><th>Asset</th><th>Amount</th><th>Value $</th><th>P&L/trade $</th><th>Status</th><th>Reason</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="market" class="panel">
+    <table id="market-table">
+      <thead><tr><th>Asset</th><th>Chain</th><th>Price $</th><th>24h %</th><th>7d %</th><th>Vol 24h $</th><th>Mkt Cap $</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="settings" class="panel">
+    <form id="settings-form">
+      <label>Profit target % (optional, stop when portfolio is up this much)
+        <input type="number" id="profit_target_pct" step="0.1" min="0" placeholder="e.g. 50"></label>
+      <label>Max loss % (required, hard stop)
+        <input type="number" id="max_loss_pct" step="0.1" min="0" max="100" required value="20"></label>
+      <label>Risk profile
+        <select id="risk_profile">
+          <option value="safe">Safe</option>
+          <option value="balanced" selected>Balanced</option>
+          <option value="aggressive">Aggressive</option>
+        </select></label>
+      <label>Max position size (% of portfolio in one asset)
+        <input type="number" id="max_position_pct" step="0.1" min="0.1" max="100" value="25"></label>
+      <label>Allowed blockchains (comma-separated, e.g. solana, ethereum, base)
+        <input type="text" id="allowed_chains" value="solana, ethereum, binance-smart-chain, base, polygon"></label>
+      <label>Decision time (UTC)
+        <input type="time" id="decision_time_utc" value="00:00"></label>
+      <label>Custom prompt — instructions the AI reads before every decision
+        <textarea id="custom_prompt" rows="5" placeholder="e.g. Avoid tokens less than 30 days old. Prefer high-liquidity pairs. Never hold more than 3 positions at once."></textarea></label>
+      <label>Autonomy mode
+        <select id="autonomy_mode">
+          <option value="constrained" selected>Constrained (recommended)</option>
+          <option value="full_control">Full control (no restrictions)</option>
+        </select></label>
+      <div id="full-control-warning" class="warning hidden">
+        ⚠️ Full control removes ALL user constraints. The AI will decide everything with
+        profit maximization as its only objective. Only technical limits apply. Are you sure?
+      </div>
+      <button type="submit">Save settings</button>
+    </form>
+  </section>
+
+  <section id="news" class="panel">
+    <ul id="news-list"></ul>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
