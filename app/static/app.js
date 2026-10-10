@@ -83,12 +83,19 @@ function controls() {
     $("#cycle-result").textContent = "Running decision cycle…";
     try {
       const r = await api("/api/cycle", {});
+      const fmtAction = (a) =>
+        `${a.type.toUpperCase()} ${a.asset}${a.asset_out && a.asset_out !== "USD" ? " \u2192 " + a.asset_out : ""} \u00b7 ${a.amount_or_percent} \u00b7 "${a.reason}"`;
       $("#cycle-result").textContent =
         `Cycle ${r.status.toUpperCase()}\n` +
         (r.analysis_summary ? `AI: ${r.analysis_summary} (confidence: ${r.confidence})\n` : "") +
         (r.error ? `Error: ${r.error}\n` : "") +
-        (r.executed?.length ? `Executed ${r.executed.length} action(s)\n` : "") +
-        (r.rejected?.length ? `Rejected ${r.rejected.length} action(s)` : "");
+        (r.executed?.length
+          ? `\n\u2705 EXECUTED (${r.executed.length}):\n` + r.executed.map((a) => "  \u2022 " + fmtAction(a)).join("\n") + "\n"
+          : "") +
+        (r.rejected?.length
+          ? `\n\u26d4 REJECTED by your constraints (${r.rejected.length}):\n` + r.rejected.map((a) => "  \u2022 " + fmtAction(a)).join("\n")
+          : "") +
+        (r.executed?.length || r.rejected?.length ? "" : "\nNo actions proposed (hold).");
       await Promise.all([loadState(), loadDecisions()]);
     } catch (e) { $("#cycle-result").textContent = "Failed: " + e.message; }
     $("#btn-cycle").disabled = false;
