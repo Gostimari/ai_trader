@@ -78,6 +78,23 @@ def state():
     }
 
 
+class WatchlistPayload(BaseModel):
+    asset_ids: list[str]
+
+
+@app.get("/api/watchlist")
+def get_watchlist():
+    from memicoin_core.market import DEFAULT_EXTRA_IDS
+    return {"asset_ids": db.get_setting("extra_asset_ids", DEFAULT_EXTRA_IDS) or []}
+
+
+@app.post("/api/watchlist")
+def set_watchlist(p: WatchlistPayload):
+    ids = [i.strip() for i in p.asset_ids if i.strip()][:30]
+    db.set_setting("extra_asset_ids", ids)
+    return {"ok": True, "asset_ids": ids}
+
+
 @app.get("/api/decisions")
 def decisions():
     return {"decisions": db.list_decisions()}

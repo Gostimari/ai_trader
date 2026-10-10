@@ -206,13 +206,33 @@ function liveControls() {
   });
 }
 
+async function loadWatchlist() {
+  try {
+    const w = await api("/api/watchlist");
+    $("#watchlist-ids").value = (w.asset_ids || []).join(", ");
+  } catch (e) {}
+}
+
+function watchlistControls() {
+  $("#watchlist-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const ids = $("#watchlist-ids").value.split(",").map((s) => s.trim()).filter(Boolean);
+    try {
+      await api("/api/watchlist", { asset_ids: ids });
+      $("#watchlist-status").textContent = `Saved. The AI will now consider ${ids.length} extra asset(s).`;
+    } catch (e) { alert("Failed: " + e.message); }
+  });
+}
+
 async function main() {
   tabs();
   controls();
   liveControls();
   walletControls();
+  watchlistControls();
   loadLiveStatus();
   loadWalletStatus();
+  loadWatchlist();
   await Promise.all([loadState(), loadDecisions(), loadNews()]);
   setInterval(loadState, 60000);
 }

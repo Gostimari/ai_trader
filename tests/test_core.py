@@ -615,3 +615,57 @@ class TestArcChain:
                 self._acct = None
         w = _NoRPCWallet()
         assert w._router() == "0x" + "a" * 40
+
+
+class TestWatchlist:
+    def test_default_watchlist_includes_cirbtc(self, db):
+        from memicoin_core.market import DEFAULT_EXTRA_IDS
+        assert "circle-wrapped-btc" in DEFAULT_EXTRA_IDS
+        assert db.get_setting("extra_asset_ids", DEFAULT_EXTRA_IDS) == DEFAULT_EXTRA_IDS
+
+    def test_cirbtc_chain_hint_is_arc(self):
+        from memicoin_core.market import MarketDataModule
+        assert MarketDataModule._cg_platform({"id": "circle-wrapped-btc"}) == "arc"
+
+    def test_watchlist_endpoint_roundtrip(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/watchlist", json={"asset_ids": [" bitcoin ", "", "ethereum"]})
+        assert r.status_code == 200
+        assert r.json()["asset_ids"] == ["bitcoin", "ethereum"]
+        assert c.get("/api/watchlist").json()["asset_ids"] == ["bitcoin", "ethereum"]
+
+    def test_coingecko_fetch_includes_watchlist(self, db, monkeypatch):
+        import memicoin_core.market as market_mod
+        captured = {}
+
+        class _FakeReq:
+            @staticmethod
+            def get(url, params=None, timeout=None, headers=None):
+                captured["params"] = params
+
+                class _R:
+                    status_code = 200
+
+                    def raise_for_status(self): pass
+
+                    def json(self):
+                        return [{"symbol": "CIRBTC", "name": "Circle Wrapped BTC",
+                                 "current_price": 83000, "market_cap": 1, "total_volume": 1,
+                                 "price_change_percentage_24h": 1, "id": "circle-wrapped-btc",
+                                 "platforms": {}}]
+
+                return _R()
+
+        monkeypatch.setattr(market_mod, "requests", _FakeReq)
+        db.set_setting("extra_asset_ids", ["circle-wrapped-btc"])
+        m = market_mod.MarketDataModule(db)
+        assets = m.get_market_overview(force=True)
+        assert "circle-wrapped-btc" in captured["params"]["ids"]
+        cir = [a for a in assets if a["asset"] == "CIRBTC"][0]
+        assert cir["chain"] == "arc"
+
+    def test_arc_in_default_allowed_chains(self):
+        assert "arc" in Constraints().allowed_chains

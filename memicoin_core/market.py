@@ -8,6 +8,7 @@ import requests
 from .db import Database
 
 CHAIN_HINTS = {
+    "circle-wrapped-btc": "arc",  # cirBTC: volatile BTC exposure on Arc
     "dogecoin": "dogecoin",
     "shiba-inu": "ethereum",
     "pepe": "ethereum",
@@ -30,6 +31,10 @@ DEX_SYMBOLS_BY_CHAIN = {
     "binance-smart-chain": ["FLOKI", "TURBO", "BABYDOGE"],
     "base": ["BRETT", "DEGEN", "TYBG"],
 }
+
+# Default watchlist additions beyond the meme-coin list. The user can
+# extend this via the watchlist editor (stored as the extra_asset_ids setting).
+DEFAULT_EXTRA_IDS = ["circle-wrapped-btc"]
 
 MEMECOIN_IDS = [
     "dogecoin", "shiba-inu", "pepe", "bonk", "floki", "dogwifcoin", "brett-based",
@@ -78,10 +83,12 @@ class MarketDataModule:
 
     # ---------- CoinGecko ----------
     def _fetch_coingecko(self) -> tuple[list[dict], str]:
+        extra = self.db.get_setting("extra_asset_ids", DEFAULT_EXTRA_IDS) or []
+        ids = [i.strip() for i in list(MEMECOIN_IDS) + list(extra) if i.strip()]
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
             "vs_currency": "usd",
-            "ids": ",".join(i.strip() for i in MEMECOIN_IDS if i.strip()),
+            "ids": ",".join(ids),
             "order": "market_cap_desc",
             "per_page": 50,
             "sparkline": "false",

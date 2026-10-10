@@ -83,6 +83,17 @@
       <button type="submit">Save settings</button>
     </form>
 
+    <h3 style="margin-top:28px">Watchlist — extra assets for the AI</h3>
+    <p class="hint">Beyond the built-in meme coins, the AI will analyze and price any CoinGecko-listed
+      assets you add here (e.g. <code>circle-wrapped-btc</code> for cirBTC on Arc, <code>bitcoin</code>,
+      <code>ethereum</code>). Enter CoinGecko asset ids, comma-separated.</p>
+    <form id="watchlist-form">
+      <label>Extra asset ids (CoinGecko)
+        <input type="text" id="watchlist-ids" placeholder="circle-wrapped-btc, bitcoin, ethereum"></label>
+      <div id="watchlist-status" class="hint"></div>
+      <button type="submit">Save watchlist</button>
+    </form>
+
     <h3 style="margin-top:28px">Live Trading (Phase 2)</h3>
     <p class="hint">Currently in <b id="current-mode">PAPER</b> mode. Live mode trades real funds on a
       real exchange via CCXT. Requirements: API keys with <b>trade-only permission, withdrawals DISABLED</b>.

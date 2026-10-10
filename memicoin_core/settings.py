@@ -26,7 +26,7 @@ class Constraints(BaseModel):
     )
     risk_profile: RiskProfile = "balanced"
     allowed_chains: list[str] = Field(
-        default_factory=lambda: ["solana", "ethereum", "binance-smart-chain", "base", "polygon"]
+        default_factory=lambda: ["solana", "ethereum", "binance-smart-chain", "base", "polygon", "arc"]
     )
     max_position_pct: float = Field(
         default=25.0, gt=0, le=100,
