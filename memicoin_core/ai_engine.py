@@ -364,16 +364,9 @@ class DecisionEngine:
         return None
 
     def _resolve_amount(self, action: dict, prices: dict[str, float]) -> float:
-        """Convert absolute or 'N%' amount into an absolute asset quantity."""
-        raw = action.get("amount_or_percent")
-        if isinstance(raw, str) and raw.strip().endswith("%"):
-            pct = float(raw.strip().rstrip("%"))
-            if action["type"] == "buy":
-                total = self.tracker.total_value(prices)
-                budget = total * pct / 100
-                price = prices.get(action["asset"], 0.0)
-                return budget / price if price > 0 else 0.0
-            if action["type"] in ("sell", "swap"):
-                pos = self.db.get_position(action["asset"])
-                return (pos["quantity"] * pct / 100) if pos else 0.0
-        return float(raw)
+        """Convert absolute or 'N%' amount into an absolute asset quantity.
+        Delegates to the SAME shared resolver the constraint validator uses,
+        so what is validated is exactly what is executed."""
+        from .constraints import resolve_action_amount
+        val = resolve_action_amount(action, prices, self.tracker, self.db)
+        return val if val is not None else 0.0

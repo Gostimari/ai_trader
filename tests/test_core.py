@@ -876,3 +876,72 @@ class TestStablecoinLiquidationAndKey:
         except RuntimeError as e:
             assert "stop here" in str(e)
         assert captured.get("key") == "stored-key"
+
+
+class TestPercentAmountBug:
+    """Regression: validator and executor must resolve 'N%' identically.
+    Bug found in user testing: validator read '50%' as 50 UNITS, executor
+    read it as 50% OF PORTFOLIO -> position limits bypassed."""
+
+    def test_percent_buy_rejected_over_position_limit(self, db):
+        db.set_cash(100.0)
+        c = Constraints(max_position_pct=25.0)
+        v = ConstraintValidator(db, c)
+        # AI proposes to spend 100% of the portfolio on DOGE
+        r = v.validate_action({"type": "buy", "asset": "DOGE",
+                               "amount_or_percent": "100%"}, PRICES, ASSETS)
+        assert not r.ok, "buy of 100% of portfolio must be rejected at 25% limit"
+        assert "Max position size" in r.reason
+
+    def test_percent_buy_within_limit_passes(self, db):
+        db.set_cash(100.0)
+        c = Constraints(max_position_pct=25.0)
+        v = ConstraintValidator(db, c)
+        r = v.validate_action({"type": "buy", "asset": "DOGE",
+                               "amount_or_percent": "20%"}, PRICES, ASSETS)
+        assert r.ok, r.reason
+
+    def test_validator_and_executor_resolve_identically(self, db):
+        from memicoin_core.constraints import resolve_action_amount
+        from memicoin_core.market import MarketDataError
+        db.set_cash(100.0)
+        c = Constraints(max_position_pct=25.0)
+        v = ConstraintValidator(db, c)
+        e = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        action = {"type": "buy", "asset": "DOGE", "amount_or_percent": "25%"}
+        # validator path
+        v_amt = v._resolve_amount(action, PRICES)
+        # executor path
+        e_amt = e._resolve_amount(action, PRICES)
+        assert v_amt == e_amt
+        # 25% of $100 portfolio at $0.10 = 250 units
+        assert v_amt == pytest.approx(250.0)
+
+    def test_full_cycle_enforces_position_limit_on_percent_buy(self, db, monkeypatch):
+        db.set_cash(100.0)
+        c = Constraints(max_position_pct=25.0)
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        ai_out = json.dumps({
+            "analysis_summary": "All-in on DOGE.",
+            "actions": [{"type": "buy", "asset": "DOGE",
+                         "amount_or_percent": "100%", "reason": "moon"}],
+            "confidence": "high",
+        })
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        assert result["status"] == "completed"
+        assert len(result["rejected"]) == 1
+        assert len(result["executed"]) == 0
+        assert db.get_cash() == pytest.approx(100.0)  # untouched
+        assert db.get_positions() == []
+        d = db.list_decisions()[0]
+        assert d["status"] == "rejected" and "Max position size" in d["reason"]
+
+    def test_absolute_amount_still_validated(self, db):
+        db.set_cash(100.0)
+        c = Constraints(max_position_pct=25.0)
+        v = ConstraintValidator(db, c)
+        # 900 units * $0.10 = $90 > $25 limit
+        r = v.validate_action({"type": "buy", "asset": "DOGE",
+                               "amount_or_percent": 900}, PRICES, ASSETS)
+        assert not r.ok and "Max position size" in r.reason

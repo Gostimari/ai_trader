@@ -19,6 +19,43 @@ class ValidationResult:
     reason: str
 
 
+def resolve_action_amount(action: dict, prices: dict[str, float],
+                           tracker, db) -> float | None:
+    """Resolve an action's amount_or_percent into absolute asset units.
+    Raises nothing; returns None when unresolvable."""
+    raw = action.get("amount")
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    a = action.get("amount_or_percent")
+    if isinstance(a, (int, float)):
+        return float(a) if a > 0 else None
+    if not isinstance(a, str) or not a.strip():
+        return None
+    s = a.strip()
+    is_pct = s.endswith("%")
+    if is_pct:
+        s = s[:-1].strip()
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+    if val <= 0:
+        return None
+    if not is_pct:
+        return val
+    pct = val / 100.0
+    asset = action.get("asset", "")
+    if action.get("type") == "buy":
+        total = tracker.total_value(prices)
+        price = prices.get(asset, 0.0)
+        budget = total * pct
+        return budget / price if price > 0 else None
+    pos = db.get_position(asset)
+    if not pos or pos["quantity"] <= 0:
+        return None
+    return pos["quantity"] * pct
+
+
 class ConstraintValidator:
     def __init__(self, db, constraints: Constraints):
         self.db = db
@@ -50,7 +87,7 @@ class ConstraintValidator:
 
         a_type = action.get("type")
         asset = action.get("asset", "")
-        amount = self._resolve_amount(action)
+        amount = self._resolve_amount(action, prices)
 
         if a_type not in ("buy", "sell", "swap"):
             return ValidationResult(False, f"Unknown action type: {a_type!r}")
@@ -116,17 +153,10 @@ class ConstraintValidator:
                 )
         return ValidationResult(True, "")
 
-    @staticmethod
-    def _resolve_amount(action: dict) -> float | None:
-        a = action.get("amount_or_percent")
-        if isinstance(a, str):
-            a = a.strip().rstrip("%")
-            if not a:
-                return None
-            try:
-                a = float(a)
-            except ValueError:
-                return None
-        if isinstance(action.get("amount"), (int, float)):
-            return float(action["amount"])
-        return float(a) if a is not None else None
+    def _resolve_amount(self, action: dict, prices: dict[str, float]) -> float | None:
+        """Single source of truth for how much an action means, in ABSOLUTE
+        asset units. Used by BOTH validation and execution so the constraint
+        always checks the exact amount that will be traded.
+        Percent strings: buys = % of current portfolio value;
+        sells/swaps = % of current holdings of the asset."""
+        return resolve_action_amount(action, prices, self.tracker, self.db)
