@@ -568,3 +568,50 @@ class TestOnchainAPI:
         d = db.list_decisions()[0]
         assert d["status"] == "failed"
         assert "contract address" in d["reason"]
+
+
+class TestArcChain:
+    def test_arc_in_supported_chains(self):
+        from memicoin_core.onchain import EVM_CHAINS, SUPPORTED_CHAINS
+        assert "arc" in EVM_CHAINS
+        assert "arc" in SUPPORTED_CHAINS
+        assert EVM_CHAINS["arc"]["chain_id"] == 5042
+
+    def test_arc_wallet_import_works_evm_compatible(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEMICOIN_SECRETS_DIR", str(tmp_path))
+        import importlib
+        import memicoin_core.secrets as secrets_mod
+        importlib.reload(secrets_mod)
+        s = secrets_mod.SecretStore()
+        s._backend = "file"
+        from web3 import Web3
+        acct = Web3().eth.account.create()
+        s.set("onchain_private_key", acct.key.hex())
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet(s, "arc")
+        assert w.configured()
+        assert w.address() == acct.address  # standard EVM key derivation
+
+    def test_arc_swap_refused_without_router(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MEMICOIN_ARC_ROUTER", raising=False)
+        from memicoin_core.onchain import EVMWallet
+        class _NoRPCWallet(EVMWallet):
+            def __init__(self):  # skip RPC connect; only swap-guard is tested
+                self.chain = "arc"
+                self.cfg = {"router": None, "weth": None, "chain_id": 5042}
+                self._acct = None
+        w = _NoRPCWallet()
+        res = w.swap_exact_tokens_for_tokens("0x" + "1" * 40, "0x" + "2" * 40, 5.0)
+        assert not res.ok
+        assert "No DEX router configured" in res.error
+
+    def test_arc_router_via_env(self, monkeypatch):
+        monkeypatch.setenv("MEMICOIN_ARC_ROUTER", "0x" + "a" * 40)
+        from memicoin_core.onchain import EVMWallet
+        class _NoRPCWallet(EVMWallet):
+            def __init__(self):
+                self.chain = "arc"
+                self.cfg = {"router": None, "weth": None, "chain_id": 5042}
+                self._acct = None
+        w = _NoRPCWallet()
+        assert w._router() == "0x" + "a" * 40

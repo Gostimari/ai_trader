@@ -49,6 +49,20 @@ EVM_CHAINS = {
         "weth": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "explorer": "https://bscscan.com/tx/",
     },
+    # Arc by Circle (docs.arc.io): EVM-compatible, chain ID 5042, USDC is the
+    # native gas token (18 decimals). No meme-coin DEX router exists there yet
+    # (the chain is stablecoin-native; Circle's Swap Kit is stablecoin-only),
+    # so router/weth stay unset: wallet import and balance reads work, swaps
+    # are refused with a clear error until a router is configured via
+    # MEMICOIN_ARC_ROUTER / MEMICOIN_ARC_WETH.
+    "arc": {
+        "chain_id": 5042,
+        "rpc": "https://rpc.mainnet.arc.io",
+        "router": None,
+        "weth": None,
+        "explorer": "https://explorer.arc.io/tx/",
+        "native_symbol": "USDC",
+    },
 }
 
 SOLANA = {
@@ -164,7 +178,9 @@ class EVMWallet:
                                      amount_in: float) -> TxResult:
         """Uniswap-V2-style swap via the chain router."""
         try:
-            router = self.cfg["router"]
+            router = self._router()
+            if not router:
+                return TxResult(False, error=self._no_router_error())
             dec_in = self._erc20_decimals(token_in)
             raw_in = int(amount_in * 10 ** dec_in)
             self.erc20_approve_if_needed(token_in, router, raw_in)
@@ -194,9 +210,31 @@ class EVMWallet:
             log.exception("EVM swap failed on %s", self.chain)
             return TxResult(False, error=str(e))
 
+    def _router(self) -> str | None:
+        import os
+        if self.cfg.get("router"):
+            return self.cfg["router"]
+        return os.environ.get(f"MEMICOIN_{self.chain.upper().replace('-', '_')}_ROUTER")
+
+    def _weth(self) -> str | None:
+        import os
+        if self.cfg.get("weth"):
+            return self.cfg["weth"]
+        return os.environ.get(f"MEMICOIN_{self.chain.upper().replace('-', '_')}_WETH")
+
+    def _no_router_error(self) -> str:
+        return (f"No DEX router configured for {self.chain} yet — swaps are disabled "
+                f"on this chain until one is set (MEMICOIN_{self.chain.upper().replace('-', '_')}_ROUTER)")
+
     def swap_exact_eth_for_tokens(self, token_out: str, eth_amount: float) -> TxResult:
         """Buy with native currency (ETH/MATIC/BNB) through WETH path."""
         try:
+            router = self._router()
+            if not router:
+                return TxResult(False, error=self._no_router_error())
+            weth = self._weth()
+            if not weth:
+                return TxResult(False, error=f"No wrapped-native token configured for {self.chain}")
             abi = [{"constant": False,
                     "inputs": [{"name": "amountOutMin", "type": "uint256"},
                                {"name": "path", "type": "address[]"},
@@ -207,13 +245,13 @@ class EVMWallet:
                     "type": "function"}]
             import time
             deadline = int(time.time()) + 1200
-            path = [self.cfg["weth"], self.w3.to_checksum_address(token_out)]
+            path = [self.w3.to_checksum_address(weth), self.w3.to_checksum_address(token_out)]
             router_c = self.w3.eth.contract(
-                address=self.w3.to_checksum_address(self.cfg["router"]), abi=abi)
+                address=self.w3.to_checksum_address(router), abi=abi)
             data = router_c.encode_abi("swapExactETHForTokens",
                                        args=[1, path, self.address(), deadline])
             value_wei = self.w3.to_wei(eth_amount, "ether")
-            tx_id = self._send(self._base_tx(self.cfg["router"], data, value_wei))
+            tx_id = self._send(self._base_tx(router, data, value_wei))
             return TxResult(True, tx_id=tx_id, amount=eth_amount)
         except Exception as e:
             log.exception("EVM native swap failed on %s", self.chain)

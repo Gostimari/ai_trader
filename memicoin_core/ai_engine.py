@@ -313,7 +313,7 @@ class DecisionEngine:
                 res = (wallet.swap_exact_tokens_for_tokens(token, dest, amount)
                        if chain in EVM_CHAINS else wallet.swap(token, dest, amount))
             else:
-                res = (wallet.swap_exact_tokens_for_tokens(token, wallet.cfg["weth"], amount)
+                res = (wallet.swap_exact_tokens_for_tokens(token, wallet._weth() or "", amount)
                        if chain in EVM_CHAINS else wallet.swap(token, self._native_mint(chain), amount))
         if not res.ok:
             return res.error
