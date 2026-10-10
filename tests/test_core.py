@@ -945,3 +945,75 @@ class TestPercentAmountBug:
         r = v.validate_action({"type": "buy", "asset": "DOGE",
                                "amount_or_percent": 900}, PRICES, ASSETS)
         assert not r.ok and "Max position size" in r.reason
+
+
+class TestDiversifyAndReplan:
+    def test_replan_after_full_rejection(self, db, monkeypatch):
+        db.set_cash(100.0)
+        c = Constraints(max_position_pct=25.0)
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        first = json.dumps({
+            "analysis_summary": "all-in",
+            "actions": [{"type": "buy", "asset": "DOGE",
+                         "amount_or_percent": "100%", "reason": "moon"}],
+            "confidence": "high",
+        })
+        second = json.dumps({
+            "analysis_summary": "replan",
+            "actions": [{"type": "buy", "asset": "SHIB",
+                         "amount_or_percent": "20%", "reason": "fits limits"}],
+            "confidence": "medium",
+        })
+        calls = []
+        def fake_call(prompt):
+            calls.append(prompt)
+            return first if len(calls) == 1 else second
+        monkeypatch.setattr(engine, "_call_mistral", fake_call)
+        result = engine.run_cycle()
+        assert len(calls) == 2                      # replan happened
+        assert "rejected by the user's constraints" in calls[1]
+        assert len(result["executed"]) == 1
+        assert result["executed"][0]["asset"] == "SHIB"
+        assert db.get_position("SHIB") is not None
+
+    def test_no_replan_when_something_executed(self, db, monkeypatch):
+        db.set_cash(100.0)
+        c = Constraints(max_position_pct=25.0)
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        out = json.dumps({
+            "analysis_summary": "mixed",
+            "actions": [
+                {"type": "buy", "asset": "SHIB", "amount_or_percent": "20%", "reason": "ok"},
+                {"type": "buy", "asset": "DOGE", "amount_or_percent": "100%", "reason": "big"},
+            ],
+            "confidence": "high",
+        })
+        calls = []
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: calls.append(p) or out)
+        result = engine.run_cycle()
+        assert len(calls) == 1                      # no replan round
+        assert len(result["executed"]) == 1 and len(result["rejected"]) == 1
+
+    def test_replan_failure_is_safe(self, db, monkeypatch):
+        db.set_cash(100.0)
+        c = Constraints(max_position_pct=25.0)
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        first = json.dumps({
+            "analysis_summary": "all-in",
+            "actions": [{"type": "buy", "asset": "DOGE",
+                         "amount_or_percent": "100%", "reason": "moon"}],
+            "confidence": "high",
+        })
+        def fake_call(prompt):
+            # the replan prompt contains the rejection feedback marker
+            return first if "were ALL rejected" not in prompt else "garbage not json"
+        monkeypatch.setattr(engine, "_call_mistral", fake_call)
+        result = engine.run_cycle()
+        assert result["status"] == "completed"
+        assert result["executed"] == []
+        assert db.get_cash() == pytest.approx(100.0)  # untouched either way
+
+    def test_prompt_teaches_diversification(self):
+        from memicoin_core.ai_engine import BASE_INSTRUCTIONS
+        assert "DIVERSIFY" in BASE_INSTRUCTIONS
+        assert "MULTIPLE buys" in BASE_INSTRUCTIONS

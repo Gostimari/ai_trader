@@ -65,6 +65,13 @@ Rules:
 - Use tickers exactly as they appear in the market data provided.
 - amount_or_percent: prefer an absolute quantity of the asset; you may use "N%" meaning N% of current portfolio value for buys, or N% of current holdings for sells.
 - "hold" requires no action: return an empty actions array.
+- DIVERSIFY: when buying, prefer proposing MULTIPLE buys across different
+  coins (each within the max position size) instead of one large buy.
+  A good cycle builds or adjusts several positions at once — e.g. 2-4
+  distinct actions — unless the market genuinely favors caution.
+- Percent amounts are checked against portfolio value (buys) or holdings
+  (sells) by the execution layer BEFORE execution. Anything over the
+  user's max position size will be rejected; size proposals to fit.
 - The execution layer will reject anything violating the user's constraints; do not propose violations.
 - Cash is held in USD (paper mode). To exit a position, sell it.
 """
@@ -123,28 +130,62 @@ class DecisionEngine:
                                   "reason": "AI response invalid; no trades made (safety rule)."})
             return {"cycle_id": cycle_id, "status": "invalid", "error": str(e)}
 
-        executed, rejected = [], []
-        for action in decision.actions:
-            a = action.model_dump()
-            result = self.validator.validate_action(a, prices, assets)
-            if not result.ok:
-                rejected.append(a)
-                self.db.add_decision({
-                    "cycle_id": cycle_id, "action": a["type"], "asset_in": a.get("asset"),
-                    "asset_out": a.get("asset_out"), "status": "rejected",
-                    "reason": f"Rejected ({result.reason}). AI said: {a['reason']}",
-                })
-                continue
-            self.db.set_setting("last_cycle_id", cycle_id)
-            err = self._execute(cycle_id, a, prices)
-            if err:
-                self.db.add_decision({
-                    "cycle_id": cycle_id, "action": a["type"], "asset_in": a.get("asset"),
-                    "asset_out": a.get("asset_out"), "status": "failed",
-                    "reason": f"Execution failed: {err}",
-                })
-                continue
-            executed.append(a)
+        executed, rejected, failed = [], [], []
+
+        def try_actions(actions) -> None:
+            for action in actions:
+                a = action.model_dump() if hasattr(action, "model_dump") else dict(action)
+                result = self.validator.validate_action(a, prices, assets)
+                if not result.ok:
+                    rejected.append(a)
+                    self.db.add_decision({
+                        "cycle_id": cycle_id, "action": a["type"], "asset_in": a.get("asset"),
+                        "asset_out": a.get("asset_out"), "status": "rejected",
+                        "reason": f"Rejected ({result.reason}). AI said: {a['reason']}",
+                    })
+                    continue
+                self.db.set_setting("last_cycle_id", cycle_id)
+                err = self._execute(cycle_id, a, prices)
+                if err:
+                    failed.append(a)
+                    self.db.add_decision({
+                        "cycle_id": cycle_id, "action": a["type"], "asset_in": a.get("asset"),
+                        "asset_out": a.get("asset_out"), "status": "failed",
+                        "reason": f"Execution failed: {err}",
+                    })
+                    continue
+                executed.append(a)
+
+        try_actions(decision.actions)
+
+        # One bounded replan: if everything the AI proposed was blocked and
+        # nothing executed, give the AI the rejection reasons and let it
+        # propose alternatives once. All normal validation still applies.
+        if rejected and not executed and decision.actions:
+            feedback = (
+                "Your previous proposed actions were ALL rejected by the user's "
+                "constraints:\n" + "\n".join(
+                    f"- {r['type']} {r.get('asset', '')} "
+                    f"{r.get('amount_or_percent', '')}: "
+                    + next((d["reason"] for d in self.db.list_decisions(limit=10)
+                            if d["asset_in"] == r.get("asset") and d["status"] == "rejected"
+                            and d["cycle_id"] == cycle_id), "constraint violation")
+                    for r in rejected)
+                + "\n\nPropose DIFFERENT actions that fit the constraints. "
+                  "Same JSON schema as before. Portfolio state is unchanged."
+            )
+            try:
+                raw2 = self._call_mistral(feedback)
+                decision2 = self._parse(raw2)
+            except Exception:
+                decision2 = None  # replan is a bonus round; failure is non-fatal
+            if decision2 and decision2.actions:
+                rejected2_before = len(rejected)
+                try_actions(decision2.actions)
+                # merge the replan's rejects into the report; keep first-round
+                # rejections out of the final count to avoid confusion
+                if len(rejected) > rejected2_before:
+                    rejected = rejected[rejected2_before:]
 
         self.db.finish_cycle(
             cycle_id, "completed", prompt, raw,
@@ -154,7 +195,7 @@ class DecisionEngine:
             "cycle_id": cycle_id, "status": "completed",
             "analysis_summary": decision.analysis_summary,
             "confidence": decision.confidence,
-            "executed": executed, "rejected": rejected,
+            "executed": executed, "rejected": rejected, "failed": failed,
         }
 
     # ---------- context & AI call ----------
