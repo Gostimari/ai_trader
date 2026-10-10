@@ -325,3 +325,164 @@ class TestMarketRemovedFromUI:
         assert 'id="market-table"' not in html
         js = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "app.js")).read()
         assert "api/market" not in js
+
+
+class TestSecretStore:
+    def test_roundtrip_file_backend(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEMICOIN_SECRETS_DIR", str(tmp_path))
+        import importlib
+        import memicoin_core.secrets as secrets_mod
+        importlib.reload(secrets_mod)
+        s = secrets_mod.SecretStore()
+        s._backend = "file"  # force encrypted-file backend in headless CI
+        s.set("exchange_api_key", "supersecret")
+        assert s.get("exchange_api_key") == "supersecret"
+        assert s.has("exchange_api_secret") is False
+        s.set("exchange_api_secret", "another")
+        s.delete("exchange_api_key")
+        assert s.get("exchange_api_key") is None
+        assert s.get("exchange_api_secret") == "another"
+        # stored data is encrypted, not plaintext
+        raw = (tmp_path / "secrets.encrypted").read_bytes()
+        assert b"another" not in raw
+
+    def test_engine_live_requires_configured_executor(self, db, monkeypatch):
+        c = Constraints(paper_trading=False)
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews(), live_executor=None)
+        ai_out = json.dumps({
+            "analysis_summary": "buy",
+            "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 10, "reason": "r"}],
+            "confidence": "high",
+        })
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        assert result["status"] == "completed"
+        assert len(result["executed"]) == 0
+        d = db.list_decisions()[0]
+        assert d["status"] == "failed"
+        assert "not configured" in d["reason"]
+
+
+class TestLiveModeGate:
+    def test_cannot_flip_to_live_via_constraints(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        body = {"max_loss_pct": 20, "paper_trading": False}
+        r = c.post("/api/constraints", json=body)
+        assert r.status_code == 400
+        assert "go-live" in r.json()["detail"]
+        assert load_constraints(db).paper_trading is True
+
+    def test_go_live_requires_configured_keys(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.executor, "configured", lambda: False)
+        c = TestClient(srv.app)
+        r = c.post("/api/go-live", json={"confirm": True})
+        assert r.status_code == 400
+        assert "not configured" in r.json()["detail"]
+
+    def test_go_live_then_paper(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.executor, "configured", lambda: True)
+        monkeypatch.setattr(srv.executor, "exchange_id", lambda: "binance")
+        c = TestClient(srv.app)
+        r = c.post("/api/go-live", json={"confirm": True})
+        assert r.status_code == 200 and r.json()["mode"] == "live"
+        assert load_constraints(db).paper_trading is False
+        r = c.post("/api/go-paper")
+        assert r.status_code == 200 and load_constraints(db).paper_trading is True
+
+    def test_secrets_never_returned(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "set", lambda k, v: None)
+        monkeypatch.setattr(srv.secrets, "backend_name", lambda: "file")
+        c = TestClient(srv.app)
+        r = c.post("/api/secrets", json={"exchange_id": "binance",
+                                         "api_key": "AK123", "api_secret": "SEC456"})
+        assert r.status_code == 200
+        assert "AK123" not in r.text and "SEC456" not in r.text
+        r = c.get("/api/live-status")
+        assert "AK123" not in r.text
+
+
+class TestLiveExecutor:
+    def _make_executor(self, fake_ex):
+        from memicoin_core.executor import LiveExecutor
+        ex = LiveExecutor.__new__(LiveExecutor)
+        ex.secrets = None
+        ex._exchange = fake_ex
+        return ex
+
+    def test_client_order_id_deterministic_and_unique(self):
+        from memicoin_core.executor import LiveExecutor
+        a = {"type": "buy", "asset": "DOGE", "amount_or_percent": 10}
+        id1 = LiveExecutor._client_order_id("c1", a)
+        assert id1 == LiveExecutor._client_order_id("c1", a)  # idempotent
+        assert id1 != LiveExecutor._client_order_id("c2", a)  # unique per cycle
+
+    def test_sell_reconciles_balances(self):
+        ex = self._make_executor(_FakeCCXT(base=500, quote=1000, price=0.5))
+        res = ex.sell("c1", {"type": "sell", "asset": "DOGE", "amount": 200})
+        assert res.ok, res.error
+        assert res.amount == pytest.approx(200)
+        assert res.value_usd == pytest.approx(100.0)
+
+    def test_sell_reconciliation_failure_detected(self):
+        ex = self._make_executor(_FakeCCXT(base=500, quote=1000, price=0.5, steal=True))
+        res = ex.sell("c1", {"type": "sell", "asset": "DOGE", "amount": 200})
+        assert not res.ok
+        assert "reconciliation failed" in res.error
+
+    def test_buy_rejects_insufficient_balance(self):
+        ex = self._make_executor(_FakeCCXT(base=0, quote=10, price=100.0))
+        res = ex.buy("c1", {"type": "buy", "asset": "DOGE", "amount": 1})
+        assert not res.ok and "insufficient" in res.error
+
+    def test_sell_clamps_to_available_balance(self):
+        ex = self._make_executor(_FakeCCXT(base=50, quote=1000, price=2.0))
+        res = ex.sell("c1", {"type": "sell", "asset": "DOGE", "amount": 99999})
+        assert res.ok
+        assert res.amount == pytest.approx(50)
+
+
+class _FakeCCXT:
+    """Minimal CCXT-like exchange double. No network."""
+    def __init__(self, base, quote, price, steal=False):
+        self.bal = {"DOGE": {"free": base}, "USDC": {"free": quote}}
+        self.price = price
+        self.steal = steal
+        self.orders = []
+
+    def fetch_balance(self):
+        return self.bal
+
+    def fetch_ticker(self, symbol):
+        return {"last": self.price}
+
+    def create_order(self, symbol, otype, side, amount, params=None):
+        self.orders.append((symbol, otype, side, amount, params))
+        if side == "buy":
+            filled_quote = amount
+            avg = self.price
+            self.bal["USDC"]["free"] -= filled_quote
+            got = filled_quote / avg
+            if self.steal:
+                got *= 0.5
+            self.bal["DOGE"]["free"] += got
+            return {"id": "o1", "filled": filled_quote, "average": avg, "status": "closed"}
+        filled = amount
+        avg = self.price
+        self.bal["DOGE"]["free"] -= filled
+        got = filled * avg
+        if self.steal:
+            got *= 0.5
+        self.bal["USDC"]["free"] += got
+        return {"id": "o1", "filled": filled, "average": avg, "status": "closed"}

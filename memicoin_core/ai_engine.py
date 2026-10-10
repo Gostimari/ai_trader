@@ -72,11 +72,12 @@ Rules:
 
 class DecisionEngine:
     def __init__(self, db: Database, constraints: Constraints,
-                 market: MarketDataModule, news: NewsModule):
+                 market: MarketDataModule, news: NewsModule, live_executor=None):
         self.db = db
         self.constraints = constraints
         self.market = market
         self.news = news
+        self.live_executor = live_executor
         self.tracker = PortfolioTracker(db)
         self.validator = ConstraintValidator(db, constraints)
 
@@ -132,7 +133,15 @@ class DecisionEngine:
                     "reason": f"Rejected ({result.reason}). AI said: {a['reason']}",
                 })
                 continue
-            self._execute(a, prices)
+            self.db.set_setting("last_cycle_id", cycle_id)
+            err = self._execute(cycle_id, a, prices)
+            if err:
+                self.db.add_decision({
+                    "cycle_id": cycle_id, "action": a["type"], "asset_in": a.get("asset"),
+                    "asset_out": a.get("asset_out"), "status": "failed",
+                    "reason": f"Execution failed: {err}",
+                })
+                continue
             executed.append(a)
 
         self.db.finish_cycle(
@@ -192,12 +201,18 @@ class DecisionEngine:
             raise ValueError("No JSON object found in AI response")
         return AIDecision.model_validate(json.loads(text[start:end + 1]))
 
-    # ---------- execution (paper mode; live is Phase 2) ----------
-    def _execute(self, action: dict, prices: dict[str, float]) -> None:
-        cycle_id = self.db.get_setting("last_cycle_id")
+    # ---------- execution (paper or live, chosen by constraints) ----------
+    def _execute(self, cycle_id: str, action: dict, prices: dict[str, float]) -> str | None:
+        """Execute one validated action. Returns error string or None on success."""
         asset = action["asset"]
         amount = self._resolve_amount(action, prices)
         price = prices.get(asset, 0.0)
+        if amount <= 0:
+            return f"resolved to non-positive amount for {asset}"
+
+        if not self.constraints.paper_trading:
+            return self._execute_live(cycle_id, action, asset, amount)
+
         if action["type"] == "buy":
             cost = amount * price
             self.tracker.apply_buy(asset, self._chain_of(asset), amount, cost)
@@ -228,6 +243,58 @@ class DecisionEngine:
                 "status": "executed", "reason": action["reason"],
                 "tx_id": f"paper-{utcnow()}-{asset}-{dest}",
             })
+        return None
+
+    def _execute_live(self, cycle_id: str, action: dict, asset: str, amount: float) -> str | None:
+        if self.live_executor is None or not self.live_executor.configured():
+            return "live mode selected but exchange API keys are not configured"
+        order_action = {**action, "amount": amount}
+        if action["type"] == "swap":
+            # execute as sell + buy on the pair(s)
+            dest = action.get("asset_out", "")
+            sell_res = self.live_executor.sell(cycle_id, order_action)
+            if not sell_res.ok:
+                return sell_res.error
+            self.db.add_decision({
+                "cycle_id": cycle_id, "action": "sell", "asset_in": asset, "asset_out": "USDC",
+                "amount": sell_res.amount, "value_usd": sell_res.value_usd,
+                "status": "executed", "reason": f"Swap leg 1/2: {action['reason']}",
+                "tx_id": sell_res.tx_id,
+            })
+            buy_action = {**order_action, "type": "buy", "asset": dest,
+                          "amount": sell_res.value_usd / max(self._live_price(dest), 1e-12)}
+            buy_res = self.live_executor.buy(cycle_id, buy_action)
+            if not buy_res.ok:
+                return f"swap sell leg ok ({sell_res.tx_id}) but buy leg failed: {buy_res.error}"
+            self.db.add_decision({
+                "cycle_id": cycle_id, "action": "buy", "asset_in": dest, "asset_out": "USDC",
+                "amount": buy_res.amount, "value_usd": buy_res.value_usd,
+                "status": "executed", "reason": f"Swap leg 2/2: {action['reason']}",
+                "tx_id": buy_res.tx_id,
+            })
+            return None
+        res = (self.live_executor.buy(cycle_id, order_action) if action["type"] == "buy"
+               else self.live_executor.sell(cycle_id, order_action))
+        if not res.ok:
+            return res.error
+        self.db.add_decision({
+            "cycle_id": cycle_id, "action": action["type"], "asset_in": asset, "asset_out": "USDC",
+            "amount": res.amount, "value_usd": res.value_usd, "status": "executed",
+            "reason": action["reason"], "tx_id": res.tx_id,
+        })
+        return None
+
+    def _live_price(self, asset: str) -> float:
+        try:
+            snap = self.db.latest_market_snapshot()
+            if snap:
+                import json as _json
+                for a in _json.loads(snap["payload"]):
+                    if a["asset"] == asset.upper():
+                        return a.get("price_usd", 0.0)
+        except Exception:
+            pass
+        return 0.0
 
     def _chain_of(self, asset: str) -> str | None:
         snap = self.db.latest_market_snapshot()

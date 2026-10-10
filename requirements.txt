@@ -6,3 +6,4 @@ mistralai>=0.4
 python-dotenv>=1.0
 keyring>=24
 pytest>=8.0
+ccxt>=4.0

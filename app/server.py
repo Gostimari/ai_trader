@@ -14,10 +14,12 @@ load_dotenv()
 
 from memicoin_core.ai_engine import DecisionEngine
 from memicoin_core.db import Database
+from memicoin_core.executor import SECRET_KEYS, LiveExecutor
 from memicoin_core.market import MarketDataError, MarketDataModule
 from memicoin_core.news import NewsModule
 from memicoin_core.portfolio import PortfolioTracker
 from memicoin_core.scheduler import DailyScheduler
+from memicoin_core.secrets import SecretStore
 from memicoin_core.settings import Constraints, load_constraints
 
 DB_PATH = os.environ.get("MEMICOIN_DB", os.path.join(os.getcwd(), "data", "memicoin.db"))
@@ -32,8 +34,12 @@ news = NewsModule(db)
 tracker = PortfolioTracker(db)
 
 
+secrets = SecretStore()
+executor = LiveExecutor(secrets)
+
+
 def make_engine() -> DecisionEngine:
-    return DecisionEngine(db, load_constraints(db), market, news)
+    return DecisionEngine(db, load_constraints(db), market, news, live_executor=executor)
 
 
 scheduler = DailyScheduler(db, make_engine)
@@ -88,7 +94,72 @@ def get_news():
 
 @app.post("/api/constraints")
 def set_constraints(c: Constraints):
+    current = load_constraints(db)
+    if current.paper_trading and not c.paper_trading:
+        raise HTTPException(400, "Switching to live trading requires explicit confirmation via /api/go-live")
     db.set_setting("constraints", c.to_json())
+    return {"ok": True}
+
+
+class GoLiveRequest(BaseModel):
+    confirm: bool
+
+
+@app.post("/api/go-live")
+def go_live(req: GoLiveRequest):
+    """Explicit, well-announced switch from paper to live trading (§7.3)."""
+    if not req.confirm:
+        raise HTTPException(400, "Confirmation required")
+    if not executor.configured():
+        raise HTTPException(400, "Exchange API keys not configured (set them in Settings first)")
+    c = load_constraints(db)
+    c.paper_trading = False
+    db.set_setting("constraints", c.to_json())
+    return {"ok": True, "mode": "live", "exchange": executor.exchange_id()}
+
+
+@app.post("/api/go-paper")
+def go_paper():
+    c = load_constraints(db)
+    c.paper_trading = True
+    db.set_setting("constraints", c.to_json())
+    return {"ok": True, "mode": "paper"}
+
+
+class SecretsPayload(BaseModel):
+    exchange_id: str
+    api_key: str = ""
+    api_secret: str = ""
+    api_password: str = ""
+
+
+@app.post("/api/secrets")
+def set_secrets(p: SecretsPayload):
+    """Store exchange credentials encrypted. Values are never returned."""
+    secrets.set("exchange_id", p.exchange_id.strip().lower())
+    if p.api_key:
+        secrets.set("exchange_api_key", p.api_key)
+    if p.api_secret:
+        secrets.set("exchange_api_secret", p.api_secret)
+    if p.api_password:
+        secrets.set("exchange_api_password", p.api_password)
+    return {"ok": True, "backend": secrets.backend_name()}
+
+
+@app.get("/api/live-status")
+def live_status():
+    return {
+        "configured": executor.configured(),
+        "exchange": executor.exchange_id() if executor.configured() else None,
+        "backend": secrets.backend_name(),
+        "keys_present": {k: secrets.has(k) for k in SECRET_KEYS},
+    }
+
+
+@app.delete("/api/secrets")
+def delete_secrets():
+    for k in list(SECRET_KEYS) + ["exchange_api_password"]:
+        secrets.delete(k)
     return {"ok": True}
 
 

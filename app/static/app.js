@@ -23,6 +23,10 @@ async function loadState() {
     const s = await api("/api/state");
     $("#mode-badge").textContent = s.paper_trading ? "PAPER TRADING" : "LIVE TRADING";
     $("#mode-badge").classList.toggle("live", !s.paper_trading);
+    $("#current-mode").textContent = s.paper_trading ? "PAPER" : "LIVE";
+    $("#live-warning").classList.toggle("hidden", s.paper_trading);
+    $("#btn-go-live").classList.toggle("hidden", !s.paper_trading);
+    $("#btn-go-paper").classList.toggle("hidden", s.paper_trading);
     const p = s.portfolio;
     $("#portfolio-cards").innerHTML = `
       <div class="card"><div class="k">Total value</div><div class="v">$${fmt(p.total_value_usd)}</div></div>
@@ -125,9 +129,57 @@ function controls() {
   });
 }
 
+async function loadLiveStatus() {
+  try {
+    const s = await api("/api/live-status");
+    $("#secrets-status").textContent = s.configured
+      ? `✅ Exchange "${s.exchange}" configured (stored in ${s.backend}).`
+      : "No exchange credentials configured — live trading unavailable.";
+  } catch (e) { $("#secrets-status").textContent = ""; }
+}
+
+function liveControls() {
+  $("#secrets-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const body = {
+      exchange_id: $("#exchange_id").value,
+      api_key: $("#api_key").value,
+      api_secret: $("#api_secret").value,
+      api_password: $("#api_password").value,
+    };
+    if (!body.exchange_id) return alert("Enter an exchange id (e.g. binance).");
+    const r = await api("/api/secrets", body);
+    ["#api_key", "#api_secret", "#api_password"].forEach((s) => ($(s).value = ""));
+    alert(`Credentials stored securely (${r.backend}). Reminder: use trade-only keys with withdrawals DISABLED.`);
+    loadLiveStatus();
+  });
+  $("#btn-delete-secrets").addEventListener("click", async () => {
+    if (confirm("Delete all stored exchange credentials?")) {
+      await fetch("/api/secrets", { method: "DELETE" });
+      loadLiveStatus();
+    }
+  });
+  $("#btn-go-live").addEventListener("click", async () => {
+    if (!confirm("Switch to LIVE trading with REAL funds?\n\nOnly continue if your API keys are trade-only with withdrawals disabled, and you have validated the AI in paper mode.")) return;
+    if (!confirm("Final confirmation: REAL money will be traded. Are you absolutely sure?")) return;
+    try {
+      const r = await api("/api/go-live", { confirm: true });
+      alert(`LIVE mode enabled on ${r.exchange}. The next decision cycle will trade real funds.`);
+      loadState(); loadLiveStatus();
+    } catch (e) { alert("Cannot go live: " + e.message); }
+  });
+  $("#btn-go-paper").addEventListener("click", async () => {
+    if (!confirm("Switch back to PAPER trading?")) return;
+    await api("/api/go-paper", {});
+    loadState(); loadLiveStatus();
+  });
+}
+
 async function main() {
   tabs();
   controls();
+  liveControls();
+  loadLiveStatus();
   await Promise.all([loadState(), loadDecisions(), loadNews()]);
   setInterval(loadState, 60000);
 }

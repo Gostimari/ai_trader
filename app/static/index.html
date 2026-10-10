@@ -82,6 +82,32 @@
       </div>
       <button type="submit">Save settings</button>
     </form>
+
+    <h3 style="margin-top:28px">Live Trading (Phase 2)</h3>
+    <p class="hint">Currently in <b id="current-mode">PAPER</b> mode. Live mode trades real funds on a
+      real exchange via CCXT. Requirements: API keys with <b>trade-only permission, withdrawals DISABLED</b>.
+      Meme coins are extremely volatile — only go live after validating the AI in paper mode.</p>
+    <form id="secrets-form">
+      <label>Exchange id (CCXT, e.g. binance, kraken, bybit)
+        <input type="text" id="exchange_id" placeholder="binance"></label>
+      <label>API key
+        <input type="password" id="api_key" autocomplete="off"></label>
+      <label>API secret
+        <input type="password" id="api_secret" autocomplete="off"></label>
+      <label>API password (only if your exchange requires one)
+        <input type="password" id="api_password" autocomplete="off"></label>
+      <div id="secrets-status" class="hint"></div>
+      <button type="submit">Save credentials (encrypted at rest)</button>
+      <button type="button" id="btn-delete-secrets" class="danger">Delete stored credentials</button>
+    </form>
+    <div class="controls">
+      <button id="btn-go-live" class="danger">🔴 Go LIVE</button>
+      <button id="btn-go-paper" class="hidden">← Back to paper mode</button>
+    </div>
+    <div id="live-warning" class="warning hidden">
+      ⚠️ LIVE MODE: the AI will trade REAL money on your exchange account within your constraints.
+      Max loss, allowed chains and position limits are still enforced in code, but real funds are at risk.
+    </div>
   </section>
 
   <section id="news" class="panel">
