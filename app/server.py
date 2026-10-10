@@ -51,6 +51,7 @@ def index():
 @app.get("/api/state")
 def state():
     constraints = load_constraints(db)
+    chain_filter = db.get_setting("market_chain_filter", []) or []
     try:
         prices = market.get_prices()
         portfolio = tracker.summary(prices)
@@ -68,15 +69,27 @@ def state():
         "emergency_stopped": constraints.emergency_stopped,
         "paper_trading": constraints.paper_trading,
         "total_pnl_pct": portfolio.get("total_pnl_pct", 0),
+        "market_chain_filter": chain_filter,
     }
 
 
 @app.get("/api/market")
-def market_overview():
+def market_overview(chains: str | None = None):
+    """Market table data. `chains` is a comma-separated view filter (e.g.
+    'solana,base'); empty/omitted = show all chains. The filter is view-only:
+    the decision engine and portfolio valuation always use full market data."""
     try:
-        return {"assets": market.get_market_overview(force=True)}
+        assets = market.get_market_overview(force=True)
     except MarketDataError as e:
         raise HTTPException(503, str(e))
+    if chains is not None:
+        normalized = {c.strip().lower() for c in chains.split(",") if c.strip()}
+        assets = [a for a in assets if (a.get("chain") or "").lower() in normalized]
+        db.set_setting("market_chain_filter", sorted(normalized))
+    else:
+        db.set_setting("market_chain_filter", [])
+    available = sorted({(a.get("chain") or "") for a in market.get_market_overview()})
+    return {"assets": assets, "available_chains": available}
 
 
 @app.get("/api/decisions")

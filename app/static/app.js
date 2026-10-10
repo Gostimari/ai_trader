@@ -67,15 +67,49 @@ async function loadDecisions() {
     || `<tr><td colspan="8" class="hint">No decisions yet.</td></tr>`;
 }
 
+let chainFilterLoaded = false;
+
 async function loadMarket() {
+  let active = [...document.querySelectorAll("#chain-chips .chip.active")].map((c) => c.dataset.chain);
+  if (!chainFilterLoaded) {
+    chainFilterLoaded = true;
+    try { active = (await api("/api/state")).market_chain_filter || []; } catch (e) { active = []; }
+  }
+  const qs = active.length ? "?chains=" + encodeURIComponent(active.join(",")) : "";
   try {
-    const m = await api("/api/market");
+    const m = await api("/api/market" + qs);
+    renderChainChips(m.available_chains || [], active);
     $("#market-table tbody").innerHTML = m.assets.map((a) => `
       <tr><td>${a.asset}</td><td>${a.chain || ""}</td><td>$${fmt(a.price_usd, 6)}</td>
       <td class="${pnlClass(a.change_24h_pct)}">${fmt(a.change_24h_pct, 1)}%</td>
       <td class="${pnlClass(a.change_7d_pct)}">${fmt(a.change_7d_pct, 1)}%</td>
       <td>${fmt(a.volume_24h_usd, 0)}</td><td>${fmt(a.market_cap_usd, 0)}</td></tr>`).join("");
-  } catch (e) { $("#market-table tbody").innerHTML = `<tr><td colspan="7" class="hint">Market data unavailable: ${e.message}</td></tr>`; }
+  } catch (e) {
+    renderChainChips([], active);
+    $("#market-table tbody").innerHTML = `<tr><td colspan="7" class="hint">Market data unavailable: ${e.message}</td></tr>`;
+  }
+}
+
+function renderChainChips(chains, active) {
+  const wrap = $("#chain-chips");
+  const allBtn = $("#btn-chain-all");
+  allBtn.classList.toggle("active", active.length === 0);
+  wrap.innerHTML = chains
+    .filter((c) => c)
+    .map((c) => `<button class="chip${active.includes(c) ? " active" : ""}" data-chain="${c}">${c}</button>`)
+    .join("");
+  wrap.querySelectorAll(".chip").forEach((chip) =>
+    chip.addEventListener("click", () => {
+      chip.classList.toggle("active");
+      loadMarket();
+    }));
+}
+
+function initChainFilter() {
+  $("#btn-chain-all").addEventListener("click", () => {
+    document.querySelectorAll("#chain-chips .chip").forEach((c) => c.classList.remove("active"));
+    loadMarket();
+  });
 }
 
 async function loadNews() {
@@ -139,6 +173,7 @@ function controls() {
 async function main() {
   tabs();
   controls();
+  initChainFilter();
   await Promise.all([loadState(), loadDecisions(), loadNews()]);
   loadMarket();
   setInterval(loadState, 60000);

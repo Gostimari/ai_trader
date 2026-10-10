@@ -288,3 +288,70 @@ class TestSettings:
         db.set_setting("constraints", c.to_json())
         c2 = load_constraints(db)
         assert c2.custom_prompt == "be careful"
+
+
+class TestMarketChainAttribution:
+    def test_chain_hints_used_first(self):
+        from memicoin_core.market import MarketDataModule
+        assert MarketDataModule._cg_platform({"id": "bonk"}) == "solana"
+        assert MarketDataModule._cg_platform({"id": "dogecoin"}) == "dogecoin"
+        assert MarketDataModule._cg_platform({"id": "brett-based"}) == "base"
+
+    def test_platform_fallback_when_no_hint(self):
+        from memicoin_core.market import MarketDataModule
+        coin = {"id": "some-unknown-token", "platforms": {"binance-smart-chain": "0xabc"}}
+        assert MarketDataModule._cg_platform(coin) == "binance-smart-chain"
+
+    def test_default_ethereum(self):
+        from memicoin_core.market import MarketDataModule
+        assert MarketDataModule._cg_platform({"id": "mystery"}) == "ethereum"
+
+
+class TestMarketChainFilterAPI:
+    def test_filter_returns_only_selected_chains(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        all_assets = [
+            {"asset": "BONK", "chain": "solana", "price_usd": 1},
+            {"asset": "SHIB", "chain": "ethereum", "price_usd": 2},
+            {"asset": "BRETT", "chain": "base", "price_usd": 3},
+        ]
+        monkeypatch.setattr(srv.market, "get_market_overview", lambda force=False: list(all_assets))
+        c = TestClient(srv.app)
+        r = c.get("/api/market?chains=solana,base")
+        assert r.status_code == 200
+        chains = {a["chain"] for a in r.json()["assets"]}
+        assert chains == {"solana", "base"}
+        assert "ethereum" in r.json()["available_chains"]
+
+    def test_no_filter_returns_all_and_persists_empty(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        all_assets = [{"asset": "BONK", "chain": "solana", "price_usd": 1},
+                      {"asset": "SHIB", "chain": "ethereum", "price_usd": 2}]
+        monkeypatch.setattr(srv.market, "get_market_overview", lambda force=False: list(all_assets))
+        c = TestClient(srv.app)
+        r = c.get("/api/market")
+        assert len(r.json()["assets"]) == 2
+        assert srv.db.get_setting("market_chain_filter") == []
+
+    def test_filter_persisted_and_exposed_in_state(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv.market, "get_market_overview",
+                            lambda force=False: [{"asset": "BONK", "chain": "solana", "price_usd": 1}])
+        c = TestClient(srv.app)
+        c.get("/api/market?chains=solana")
+        s = c.get("/api/state").json()
+        assert s["market_chain_filter"] == ["solana"]
+
+    def test_filter_is_view_only_engine_sees_full_data(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        all_assets = [{"asset": "BONK", "chain": "solana", "price_usd": 1},
+                      {"asset": "SHIB", "chain": "ethereum", "price_usd": 2}]
+        monkeypatch.setattr(srv.market, "get_market_overview", lambda force=False: list(all_assets))
+        c = TestClient(srv.app)
+        c.get("/api/market?chains=solana")
+        prices = srv.market.get_prices()
+        assert prices == {"BONK": 1, "SHIB": 2}

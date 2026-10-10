@@ -7,6 +7,30 @@ import requests
 
 from .db import Database
 
+CHAIN_HINTS = {
+    "dogecoin": "dogecoin",
+    "shiba-inu": "ethereum",
+    "pepe": "ethereum",
+    "bonk": "solana",
+    "floki": "ethereum",
+    "dogwifcoin": "solana",
+    "brett-based": "base",
+    "popcat": "solana",
+    "mog-coin": "ethereum",
+    "cat-in-a-dogs-world": "solana",
+    "goatseus-maximus": "solana",
+    "turbo": "ethereum",
+}
+
+# Symbols traded on-chain per chain, used by the DexScreener fallback so we
+# only query chains the user actually wants to see.
+DEX_SYMBOLS_BY_CHAIN = {
+    "ethereum": ["SHIB", "PEPE", "FLOKI", "TURBO", "MOG"],
+    "solana": ["BONK", "WIF", "POPCAT", "MEW", "GOAT"],
+    "binance-smart-chain": ["FLOKI", "TURBO", "BABYDOGE"],
+    "base": ["BRETT", "DEGEN", "TYBG"],
+}
+
 MEMECOIN_IDS = [
     "dogecoin", "shiba-inu", "pepe", "bonk", "floki", "dogwifcoin", "brett-based",
     "popcat", "mog-coin", "cat-in-a-dogs-world", " goatseus-maximus", "turbo",
@@ -87,6 +111,12 @@ class MarketDataModule:
 
     @staticmethod
     def _cg_platform(coin: dict) -> str:
+        """Best-effort chain attribution: CoinGecko markets endpoint has no
+        chain field, so use a curated hint first, then any platform data,
+        else default to ethereum."""
+        hint = CHAIN_HINTS.get(coin.get("id", ""))
+        if hint:
+            return hint
         platforms = coin.get("platforms") or {}
         if platforms:
             first = next(iter(platforms))
@@ -95,7 +125,7 @@ class MarketDataModule:
 
     # ---------- DexScreener fallback ----------
     def _fetch_dexscreener(self) -> tuple[list[dict], str]:
-        symbols = ["DOGE", "SHIB", "PEPE", "BONK", "WIF", "FLOKI", "POPCAT", "TURBO"]
+        symbols = sorted({s for syms in DEX_SYMBOLS_BY_CHAIN.values() for s in syms})
         assets: dict[str, dict] = {}
         for sym in symbols:
             url = f"https://api.dexscreener.com/latest/dex/search?q={sym}"
