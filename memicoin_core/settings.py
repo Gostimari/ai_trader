@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 
 RiskProfile = Literal["safe", "balanced", "aggressive"]
 AutonomyMode = Literal["constrained", "full_control"]
+# exchange = Mode A (CCXT), onchain = Mode B (imported hot wallet + DEX)
+LiveExecutionMode = Literal["exchange", "onchain"]
 
 SETTINGS_VERSION = 1
 
@@ -36,6 +38,9 @@ class Constraints(BaseModel):
     )
     decision_time_utc: str = "00:00"
     paper_trading: bool = True
+    live_execution_mode: LiveExecutionMode = "exchange"
+    # chain used for Mode B on-chain swaps (must be in onchain.SUPPORTED_CHAINS)
+    onchain_chain: str = "ethereum"
     starting_capital_usd: float = 100.0
     trading_paused: bool = False
     emergency_stopped: bool = False

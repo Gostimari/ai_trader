@@ -39,7 +39,8 @@ executor = LiveExecutor(secrets)
 
 
 def make_engine() -> DecisionEngine:
-    return DecisionEngine(db, load_constraints(db), market, news, live_executor=executor)
+    return DecisionEngine(db, load_constraints(db), market, news,
+                          live_executor=executor, onchain_secrets=secrets)
 
 
 scheduler = DailyScheduler(db, make_engine)
@@ -160,6 +161,81 @@ def live_status():
 def delete_secrets():
     for k in list(SECRET_KEYS) + ["exchange_api_password"]:
         secrets.delete(k)
+    return {"ok": True}
+
+
+# ---------- on-chain wallet (Mode B) ----------
+class WalletImport(BaseModel):
+    chain: str
+    private_key: str
+
+
+@app.post("/api/wallet/import")
+def wallet_import(w: WalletImport):
+    """Import a hot wallet private key for on-chain trading. The key is stored
+    encrypted and NEVER returned; only the derived public address is echoed once
+    so the user can verify it matches their wallet."""
+    from memicoin_core.onchain import SUPPORTED_CHAINS, wallet_for
+    chain = w.chain.strip().lower()
+    if chain == "ton":
+        raise HTTPException(400, "TON support is not enabled yet — the swap path could not be safely tested")
+    if chain not in SUPPORTED_CHAINS:
+        raise HTTPException(400, f"Unsupported chain. Supported: {', '.join(SUPPORTED_CHAINS)}")
+    try:
+        if chain == "solana":
+            import json as _json
+            from solders.keypair import Keypair
+            try:
+                kp = Keypair.from_bytes(bytes(_json.loads(w.private_key)))
+            except Exception:
+                kp = Keypair.from_base58_text(w.private_key)
+            secrets.set("onchain_solana_private_key", w.private_key)
+            return {"ok": True, "chain": chain, "address": str(kp.pubkey())}
+        else:
+            from web3 import Web3
+            key = w.private_key if w.private_key.startswith("0x") else "0x" + w.private_key
+            acct = Web3().eth.account.from_key(key)
+            secrets.set("onchain_private_key", key)
+            return {"ok": True, "chain": chain, "address": acct.address}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Invalid private key: {e}")
+
+
+@app.get("/api/wallet/status")
+def wallet_status():
+    from memicoin_core.onchain import EVM_CHAINS, SUPPORTED_CHAINS
+    c = load_constraints(db)
+    chain = c.onchain_chain
+    out = {"mode": c.live_execution_mode, "chain": chain,
+           "supported_chains": SUPPORTED_CHAINS, "configured": False, "address": None}
+    if chain == "solana":
+        configured = secrets.has("onchain_solana_private_key")
+        if configured:
+            from memicoin_core.onchain import SolanaWallet
+            out["configured"] = True
+            try:
+                out["address"] = SolanaWallet(secrets).address()
+            except Exception:
+                pass
+    elif chain in EVM_CHAINS:
+        configured = secrets.has("onchain_private_key")
+        if configured:
+            from memicoin_core.onchain import EVMWallet
+            out["configured"] = True
+            try:
+                out["address"] = EVMWallet(secrets, chain).address()
+            except Exception:
+                pass
+    out["configured"] = out.get("configured") or False
+    return out
+
+
+@app.delete("/api/wallet")
+def wallet_delete():
+    secrets.delete("onchain_private_key")
+    secrets.delete("onchain_solana_private_key")
     return {"ok": True}
 
 

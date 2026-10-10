@@ -129,6 +129,37 @@ function controls() {
   });
 }
 
+async function loadWalletStatus() {
+  try {
+    const s = await api("/api/wallet/status");
+    $("#wallet-status").textContent = s.configured
+      ? `✅ ${s.chain} wallet linked: ${s.address}`
+      : `No ${s.chain} wallet imported.`;
+  } catch (e) { $("#wallet-status").textContent = ""; }
+}
+
+function walletControls() {
+  $("#wallet-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const chain = $("#wallet-chain").value;
+    const key = $("#wallet-key").value.trim();
+    if (!key) return alert("Paste the wallet private key.");
+    if (!confirm("Import this wallet for AUTONOMOUS on-chain trading?\n\nThe app will store the key encrypted and the AI will be able to move these funds within your constraints. ONLY use a dedicated hot wallet with limited funds.")) return;
+    try {
+      const r = await api("/api/wallet/import", { chain, private_key: key });
+      $("#wallet-key").value = "";
+      alert(`Wallet linked. Verify this address matches your wallet:\n${r.address}`);
+      loadWalletStatus();
+    } catch (e) { alert("Import failed: " + e.message); }
+  });
+  $("#btn-wallet-delete").addEventListener("click", async () => {
+    if (confirm("Remove the imported wallet from the app?")) {
+      await fetch("/api/wallet", { method: "DELETE" });
+      loadWalletStatus();
+    }
+  });
+}
+
 async function loadLiveStatus() {
   try {
     const s = await api("/api/live-status");
@@ -179,7 +210,9 @@ async function main() {
   tabs();
   controls();
   liveControls();
+  walletControls();
   loadLiveStatus();
+  loadWalletStatus();
   await Promise.all([loadState(), loadDecisions(), loadNews()]);
   setInterval(loadState, 60000);
 }

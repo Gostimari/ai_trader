@@ -486,3 +486,85 @@ class _FakeCCXT:
             got *= 0.5
         self.bal["USDC"]["free"] += got
         return {"id": "o1", "filled": filled, "average": avg, "status": "closed"}
+
+
+class TestOnchainWallet:
+    def test_evm_key_import_derives_address(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEMICOIN_SECRETS_DIR", str(tmp_path))
+        import importlib
+        import memicoin_core.secrets as secrets_mod
+        importlib.reload(secrets_mod)
+        s = secrets_mod.SecretStore()
+        s._backend = "file"
+        from web3 import Web3
+        acct = Web3().eth.account.create()
+        s.set("onchain_private_key", acct.key.hex())
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet(s, "base")
+        assert w.configured()
+        assert w.address() == acct.address
+
+    def test_solana_keypair_import(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEMICOIN_SECRETS_DIR", str(tmp_path))
+        import importlib
+        import memicoin_core.secrets as secrets_mod
+        importlib.reload(secrets_mod)
+        s = secrets_mod.SecretStore()
+        s._backend = "file"
+        from solders.keypair import Keypair
+        import json as _json
+        kp = Keypair()
+        s.set("onchain_solana_private_key", _json.dumps(list(bytes(kp))))
+        from memicoin_core.onchain import SolanaWallet
+        w = SolanaWallet(s)
+        assert w.configured()
+        assert w.address() == str(kp.pubkey())
+
+    def test_ton_not_enabled(self):
+        from memicoin_core.onchain import wallet_for
+        with pytest.raises(RuntimeError):
+            wallet_for("ton", None)
+
+
+class TestOnchainAPI:
+    def test_import_rejects_bad_chain_and_key(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/wallet/import", json={"chain": "robinhood", "private_key": "x"})
+        assert r.status_code == 400
+        r = c.post("/api/wallet/import", json={"chain": "ton", "private_key": "x"})
+        assert r.status_code == 400 and "not enabled" in r.json()["detail"]
+
+    def test_import_never_echoes_key(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/wallet/import",
+                   json={"chain": "ethereum", "private_key": "0x" + "f" * 64})
+        assert r.status_code == 400  # invalid key rejected...
+        assert "0x" + "f" * 64 not in r.text  # ...and never echoed
+        r = c.get("/api/wallet/status")
+        assert "0x" not in r.text or r.json()["address"] is None
+
+    def test_onchain_execution_requires_contract_address(self, db, monkeypatch):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain",
+                        onchain_chain="base")
+        from memicoin_core.secrets import SecretStore
+        class _NullStore:
+            def has(self, k): return True
+            def get(self, k): return "0x" + "0" * 64
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews(),
+                                onchain_secrets=_NullStore())
+        ai_out = json.dumps({
+            "analysis_summary": "buy",
+            "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 5, "reason": "r"}],
+            "confidence": "low",
+        })
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        d = db.list_decisions()[0]
+        assert d["status"] == "failed"
+        assert "contract address" in d["reason"]

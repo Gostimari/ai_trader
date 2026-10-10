@@ -100,6 +100,26 @@
       <button type="submit">Save credentials (encrypted at rest)</button>
       <button type="button" id="btn-delete-secrets" class="danger">Delete stored credentials</button>
     </form>
+    <h3 style="margin-top:28px">On-chain Wallet (Mode B)</h3>
+    <p class="hint">Import a hot wallet private key and the app trades directly on DEXs
+      (Uniswap/PancakeSwap on EVM chains, Jupiter on Solana) — no exchange account needed.
+      The key is stored encrypted and used only for signing. TON is not enabled yet.
+      Robinhood and other custodial brokers cannot be linked (no key exists to import).</p>
+    <form id="wallet-form">
+      <label>Chain
+        <select id="wallet-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="base">Base</option>
+          <option value="polygon">Polygon</option>
+          <option value="binance-smart-chain">BSC</option>
+          <option value="solana">Solana</option>
+        </select></label>
+      <label>Private key (EVM: hex with 0x · Solana: base58 or JSON byte array)
+        <input type="password" id="wallet-key" autocomplete="off"></label>
+      <div id="wallet-status" class="hint"></div>
+      <button type="submit">Import wallet</button>
+      <button type="button" id="btn-wallet-delete" class="danger">Remove wallet from app</button>
+    </form>
     <div class="controls">
       <button id="btn-go-live" class="danger">🔴 Go LIVE</button>
       <button id="btn-go-paper" class="hidden">← Back to paper mode</button>

@@ -72,12 +72,14 @@ Rules:
 
 class DecisionEngine:
     def __init__(self, db: Database, constraints: Constraints,
-                 market: MarketDataModule, news: NewsModule, live_executor=None):
+                 market: MarketDataModule, news: NewsModule, live_executor=None,
+                 onchain_secrets=None):
         self.db = db
         self.constraints = constraints
         self.market = market
         self.news = news
         self.live_executor = live_executor
+        self._onchain_secrets = onchain_secrets
         self.tracker = PortfolioTracker(db)
         self.validator = ConstraintValidator(db, constraints)
 
@@ -246,6 +248,8 @@ class DecisionEngine:
         return None
 
     def _execute_live(self, cycle_id: str, action: dict, asset: str, amount: float) -> str | None:
+        if self.constraints.live_execution_mode == "onchain":
+            return self._execute_onchain(cycle_id, action, asset, amount)
         if self.live_executor is None or not self.live_executor.configured():
             return "live mode selected but exchange API keys are not configured"
         order_action = {**action, "amount": amount}
@@ -283,6 +287,51 @@ class DecisionEngine:
             "reason": action["reason"], "tx_id": res.tx_id,
         })
         return None
+
+    def _execute_onchain(self, cycle_id: str, action: dict, asset: str, amount: float) -> str | None:
+        """Mode B: swap on a DEX with the imported hot wallet. The AI works in
+        token tickers; on-chain mode requires contract addresses/mints, so we
+        look them up from the market snapshot's chain data."""
+        from .onchain import EVM_CHAINS, wallet_for
+        chain = self.constraints.onchain_chain
+        wallet = wallet_for(chain, self._onchain_secrets)
+        if not wallet.configured():
+            return f"on-chain mode selected but no {chain} private key imported"
+        # asset identifiers in on-chain mode are contract addresses/mints,
+        # supplied by the AI as the asset field and validated against the
+        # chain registry; a bare ticker cannot be traded on-chain.
+        token = action["asset"]
+        if not self._looks_like_address(token):
+            return (f"on-chain swap needs a token contract address for {token!r}; "
+                    f"the AI must provide contract/mint addresses in on-chain mode")
+        if action["type"] == "buy":
+            res = (wallet.swap_exact_eth_for_tokens(token, amount)
+                   if chain in EVM_CHAINS else wallet.swap("native", token, amount))
+        else:
+            dest = action.get("asset_out") or ("native" if chain in EVM_CHAINS else self._native_mint(chain))
+            if action["type"] == "swap" and dest and self._looks_like_address(dest):
+                res = (wallet.swap_exact_tokens_for_tokens(token, dest, amount)
+                       if chain in EVM_CHAINS else wallet.swap(token, dest, amount))
+            else:
+                res = (wallet.swap_exact_tokens_for_tokens(token, wallet.cfg["weth"], amount)
+                       if chain in EVM_CHAINS else wallet.swap(token, self._native_mint(chain), amount))
+        if not res.ok:
+            return res.error
+        self.db.add_decision({
+            "cycle_id": cycle_id, "action": action["type"], "asset_in": asset,
+            "asset_out": action.get("asset_out") or "native",
+            "amount": amount, "status": "executed",
+            "reason": action["reason"], "tx_id": res.tx_id,
+        })
+        return None
+
+    @staticmethod
+    def _looks_like_address(s: str) -> bool:
+        return bool(s) and (s.startswith("0x") and len(s) == 42 or len(s) in (32, 44) and not s.isupper() == s.islower())
+
+    @staticmethod
+    def _native_mint(chain: str) -> str:
+        return "So11111111111111111111111111111111111111112" if chain == "solana" else ""
 
     def _live_price(self, asset: str) -> float:
         try:
