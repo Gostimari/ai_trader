@@ -105,9 +105,25 @@ function controls() {
     if (confirm("Halt all trading immediately?")) { await api("/api/emergency-stop", {}); loadState(); }
   });
   $("#btn-stable").addEventListener("click", async () => {
-    if (confirm("Sell ALL positions and convert to cash? This cannot be undone.")) {
-      await api("/api/emergency-to-stablecoin"); loadState(); loadDecisions();
+    if (!confirm("Sell ALL positions and convert to USDC? This cannot be undone.")) return;
+    const btn = $("#btn-stable");
+    btn.disabled = true;
+    btn.textContent = "Converting\u2026";
+    try {
+      const r = await api("/api/emergency-to-stablecoin", {});
+      const msg = r.mode === "real"
+        ? (r.ok ? "All liquidated to stablecoins."
+                : "Liquidation finished with failures: " +
+                  (r.results || []).filter((x) => !x.ok)
+                    .map((x) => `${x.symbol} on ${x.chain}: ${x.error}`).join("; "))
+        : "All paper positions converted to cash.";
+      alert(msg);
+    } catch (e) {
+      alert("Liquidation FAILED: " + e.message);
     }
+    btn.disabled = false;
+    btn.textContent = "\ud83d\udcb5 Convert all to USDC (per chain)";
+    loadState(); loadDecisions();
   });
   $("#btn-reset").addEventListener("click", async () => {
     if (confirm("Reset paper portfolio to starting capital?")) { await api("/api/reset-paper", {}); loadState(); loadDecisions(); }
