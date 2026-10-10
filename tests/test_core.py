@@ -375,42 +375,28 @@ class TestLiveModeGate:
         assert "go-live" in r.json()["detail"]
         assert load_constraints(db).paper_trading is True
 
-    def test_go_live_requires_configured_keys(self, db, monkeypatch):
+    def test_go_live_requires_imported_wallet(self, db, monkeypatch):
         import app.server as srv
         from fastapi.testclient import TestClient
         monkeypatch.setattr(srv, "db", db)
-        monkeypatch.setattr(srv.executor, "configured", lambda: False)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: False)
         c = TestClient(srv.app)
         r = c.post("/api/go-live", json={"confirm": True})
         assert r.status_code == 400
-        assert "not configured" in r.json()["detail"]
+        assert "No wallet imported" in r.json()["detail"]
 
-    def test_go_live_then_paper(self, db, monkeypatch):
+    def test_go_live_then_paper_with_wallet(self, db, monkeypatch):
         import app.server as srv
         from fastapi.testclient import TestClient
         monkeypatch.setattr(srv, "db", db)
-        monkeypatch.setattr(srv.executor, "configured", lambda: True)
-        monkeypatch.setattr(srv.executor, "exchange_id", lambda: "binance")
+        monkeypatch.setattr(srv.secrets, "has", lambda k: True)
         c = TestClient(srv.app)
         r = c.post("/api/go-live", json={"confirm": True})
-        assert r.status_code == 200 and r.json()["mode"] == "live"
-        assert load_constraints(db).paper_trading is False
+        assert r.status_code == 200 and r.json()["mode"] == "real"
+        cc = load_constraints(db)
+        assert cc.paper_trading is False and cc.live_execution_mode == "onchain"
         r = c.post("/api/go-paper")
         assert r.status_code == 200 and load_constraints(db).paper_trading is True
-
-    def test_secrets_never_returned(self, db, monkeypatch):
-        import app.server as srv
-        from fastapi.testclient import TestClient
-        monkeypatch.setattr(srv, "db", db)
-        monkeypatch.setattr(srv.secrets, "set", lambda k, v: None)
-        monkeypatch.setattr(srv.secrets, "backend_name", lambda: "file")
-        c = TestClient(srv.app)
-        r = c.post("/api/secrets", json={"exchange_id": "binance",
-                                         "api_key": "AK123", "api_secret": "SEC456"})
-        assert r.status_code == 200
-        assert "AK123" not in r.text and "SEC456" not in r.text
-        r = c.get("/api/live-status")
-        assert "AK123" not in r.text
 
 
 class TestLiveExecutor:
@@ -534,8 +520,8 @@ class TestOnchainAPI:
         c = TestClient(srv.app)
         r = c.post("/api/wallet/import", json={"chain": "robinhood", "private_key": "x"})
         assert r.status_code == 400
-        r = c.post("/api/wallet/import", json={"chain": "ton", "private_key": "x"})
-        assert r.status_code == 400 and "not enabled" in r.json()["detail"]
+        r = c.post("/api/wallet/import", json={"chain": "evm", "private_key": "not-a-key"})
+        assert r.status_code == 400
 
     def test_import_never_echoes_key(self, db, monkeypatch):
         import app.server as srv
@@ -699,3 +685,31 @@ class TestWatchlist:
 
     def test_arc_in_default_allowed_chains(self):
         assert "arc" in Constraints().allowed_chains
+
+
+class TestEvmMultiChainImport:
+    def test_one_evm_key_valid_for_all_evm_chains(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        from web3 import Web3
+        acct = Web3().eth.account.create()
+        r = c.post("/api/wallet/import",
+                   json={"chain": "evm", "private_key": acct.key.hex()})
+        assert r.status_code == 200
+        assert r.json()["chain"] == "evm"
+        assert r.json()["address"] == acct.address
+        st = c.get("/api/wallet/status").json()
+        assert st["evm_configured"] is True
+        assert st["evm_address"] == acct.address
+        # the same key derives the same address on every EVM chain
+        from memicoin_core.onchain import EVMWallet
+        for ch in ("ethereum", "base", "polygon", "binance-smart-chain", "arc"):
+            assert EVMWallet(srv.secrets, ch).address() == acct.address
+
+    def test_exchange_form_removed_from_ui(self):
+        html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
+        assert "secrets-form" not in html
+        assert "Live Trading (Phase 2)" not in html
+        assert "btn-mode-paper" in html and "btn-mode-real" in html

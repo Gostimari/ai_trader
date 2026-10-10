@@ -23,10 +23,7 @@ async function loadState() {
     const s = await api("/api/state");
     $("#mode-badge").textContent = s.paper_trading ? "PAPER TRADING" : "LIVE TRADING";
     $("#mode-badge").classList.toggle("live", !s.paper_trading);
-    $("#current-mode").textContent = s.paper_trading ? "PAPER" : "LIVE";
-    $("#live-warning").classList.toggle("hidden", s.paper_trading);
-    $("#btn-go-live").classList.toggle("hidden", !s.paper_trading);
-    $("#btn-go-paper").classList.toggle("hidden", s.paper_trading);
+
     const p = s.portfolio;
     $("#portfolio-cards").innerHTML = `
       <div class="card"><div class="k">Total value</div><div class="v">$${fmt(p.total_value_usd)}</div></div>
@@ -132,77 +129,67 @@ function controls() {
 async function loadWalletStatus() {
   try {
     const s = await api("/api/wallet/status");
-    $("#wallet-status").textContent = s.configured
-      ? `✅ ${s.chain} wallet linked: ${s.address}`
-      : `No ${s.chain} wallet imported.`;
+    const st = $("#wallet-status");
+    if (s.evm_configured && s.solana_configured) {
+      st.textContent = `✅ EVM wallet: ${s.evm_address} · Solana wallet: ${s.solana_address}`;
+    } else if (s.evm_configured) {
+      st.textContent = `✅ EVM multi-chain wallet linked: ${s.evm_address} (works on Ethereum, Base, Polygon, BSC, Arc)`;
+      if (!s.solana_configured) st.textContent += " — no Solana key";
+    } else if (s.solana_configured) {
+      st.textContent = `✅ Solana wallet linked: ${s.solana_address} — no EVM key`;
+    } else {
+      st.textContent = "No wallet imported — real money mode needs at least one key.";
+    }
   } catch (e) { $("#wallet-status").textContent = ""; }
 }
 
 function walletControls() {
   $("#wallet-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const chain = $("#wallet-chain").value;
+    const type = $("#wallet-chain").value;
     const key = $("#wallet-key").value.trim();
     if (!key) return alert("Paste the wallet private key.");
-    if (!confirm("Import this wallet for AUTONOMOUS on-chain trading?\n\nThe app will store the key encrypted and the AI will be able to move these funds within your constraints. ONLY use a dedicated hot wallet with limited funds.")) return;
+    if (!confirm("Import this wallet for AUTONOMOUS trading?\n\nThe key is stored encrypted and the AI will move these funds within your constraints. ONLY use a dedicated hot wallet with limited funds.")) return;
     try {
-      const r = await api("/api/wallet/import", { chain, private_key: key });
+      const r = await api("/api/wallet/import", { chain: type, private_key: key });
       $("#wallet-key").value = "";
-      alert(`Wallet linked. Verify this address matches your wallet:\n${r.address}`);
-      loadWalletStatus();
+      alert(`Wallet linked. Verify this address matches yours:\n${r.address}`);
+      loadWalletStatus(); refreshModeUI();
     } catch (e) { alert("Import failed: " + e.message); }
   });
   $("#btn-wallet-delete").addEventListener("click", async () => {
-    if (confirm("Remove the imported wallet from the app?")) {
+    if (confirm("Remove ALL imported wallet keys from the app?")) {
       await fetch("/api/wallet", { method: "DELETE" });
-      loadWalletStatus();
+      loadWalletStatus(); refreshModeUI();
     }
   });
 }
 
-async function loadLiveStatus() {
-  try {
-    const s = await api("/api/live-status");
-    $("#secrets-status").textContent = s.configured
-      ? `✅ Exchange "${s.exchange}" configured (stored in ${s.backend}).`
-      : "No exchange credentials configured — live trading unavailable.";
-  } catch (e) { $("#secrets-status").textContent = ""; }
+async function refreshModeUI() {
+  const s = await api("/api/state");
+  const paper = s.paper_trading;
+  $("#btn-mode-paper").classList.toggle("active", paper);
+  $("#btn-mode-real").classList.toggle("active", !paper);
+  $("#real-mode-warning").classList.toggle("hidden", paper);
+  $("#mode-hint").textContent = paper
+    ? "Paper mode: the AI trades against real market data with virtual funds. No risk."
+    : "Real money mode: the AI trades your imported wallet's funds on DEXs. Constraints still enforced in code.";
 }
 
-function liveControls() {
-  $("#secrets-form").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    const body = {
-      exchange_id: $("#exchange_id").value,
-      api_key: $("#api_key").value,
-      api_secret: $("#api_secret").value,
-      api_password: $("#api_password").value,
-    };
-    if (!body.exchange_id) return alert("Enter an exchange id (e.g. binance).");
-    const r = await api("/api/secrets", body);
-    ["#api_key", "#api_secret", "#api_password"].forEach((s) => ($(s).value = ""));
-    alert(`Credentials stored securely (${r.backend}). Reminder: use trade-only keys with withdrawals DISABLED.`);
-    loadLiveStatus();
-  });
-  $("#btn-delete-secrets").addEventListener("click", async () => {
-    if (confirm("Delete all stored exchange credentials?")) {
-      await fetch("/api/secrets", { method: "DELETE" });
-      loadLiveStatus();
-    }
-  });
-  $("#btn-go-live").addEventListener("click", async () => {
-    if (!confirm("Switch to LIVE trading with REAL funds?\n\nOnly continue if your API keys are trade-only with withdrawals disabled, and you have validated the AI in paper mode.")) return;
-    if (!confirm("Final confirmation: REAL money will be traded. Are you absolutely sure?")) return;
-    try {
-      const r = await api("/api/go-live", { confirm: true });
-      alert(`LIVE mode enabled on ${r.exchange}. The next decision cycle will trade real funds.`);
-      loadState(); loadLiveStatus();
-    } catch (e) { alert("Cannot go live: " + e.message); }
-  });
-  $("#btn-go-paper").addEventListener("click", async () => {
-    if (!confirm("Switch back to PAPER trading?")) return;
+function modeControls() {
+  $("#btn-mode-paper").addEventListener("click", async () => {
     await api("/api/go-paper", {});
-    loadState(); loadLiveStatus();
+    refreshModeUI();
+  });
+  $("#btn-mode-real").addEventListener("click", async () => {
+    const st = await api("/api/wallet/status");
+    if (!st.evm_configured && !st.solana_configured)
+      return alert("Import a wallet first (section 3 below).");
+    if (!confirm("Switch to REAL MONEY mode?\n\nThe AI will trade your wallet's actual funds. Constraints still apply, but DEX swaps are irreversible.")) return;
+    if (!confirm("Final confirmation: real funds will be traded. Continue?")) return;
+    try { await api("/api/go-live", { confirm: true }); }
+    catch (e) { return alert("Cannot switch: " + e.message); }
+    refreshModeUI();
   });
 }
 
@@ -227,12 +214,12 @@ function watchlistControls() {
 async function main() {
   tabs();
   controls();
-  liveControls();
+  modeControls();
   walletControls();
   watchlistControls();
-  loadLiveStatus();
   loadWalletStatus();
   loadWatchlist();
+  refreshModeUI();
   await Promise.all([loadState(), loadDecisions(), loadNews()]);
   setInterval(loadState, 60000);
 }

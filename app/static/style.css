@@ -32,6 +32,10 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: .85rem; colo
 input, select, textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: .9rem; }
 .warning { background: #4a1f24; color: #ff9aa5; padding: 10px; border-radius: 8px; font-size: .8rem; }
 .hidden { display: none; }
+.mode-switch { display: flex; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
+.mode-btn { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 10px 18px; border-radius: 10px; font-size: .9rem; cursor: pointer; }
+.mode-btn.active { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 700; }
+.mode-btn.danger.active { background: var(--red); color: #fff; border-color: var(--red); }
 .hint { color: var(--muted); font-size: .8rem; }
 #news-list { list-style: none; padding: 0; }
 #news-list li { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; font-size: .9rem; }

@@ -52,80 +52,60 @@
   </section>
 
   <section id="settings" class="panel">
+
+    <h3>1 · Trading Mode</h3>
+    <div class="mode-switch">
+      <button id="btn-mode-paper" class="mode-btn active">📝 Paper money (virtual $100)</button>
+      <button id="btn-mode-real" class="mode-btn danger">💰 Real money (my wallet)</button>
+    </div>
+    <p class="hint" id="mode-hint">Paper mode: the AI trades against real market data with virtual funds. No risk.</p>
+    <div id="real-mode-warning" class="warning hidden">
+      ⚠️ REAL MONEY MODE: the AI will trade the imported wallet's actual funds on DEXs.
+      Your constraints (max loss, position limits, allowed chains) still apply and are enforced in code,
+      but real funds are at risk. DEX swaps are irreversible.
+    </div>
+
+    <h3 style="margin-top:28px">2 · Constraints for the AI</h3>
+    <p class="hint">Hard limits enforced in code on every action — the AI cannot break these.</p>
     <form id="settings-form">
-      <label>Profit target % (optional, stop when portfolio is up this much)
-        <input type="number" id="profit_target_pct" step="0.1" min="0" placeholder="e.g. 50"></label>
-      <label>Max loss % (required, hard stop)
+      <label>Max loss % (hard stop: trading halts when the portfolio is down this much)
         <input type="number" id="max_loss_pct" step="0.1" min="0" max="100" required value="20"></label>
-      <label>Risk profile
-        <select id="risk_profile">
-          <option value="safe">Safe</option>
-          <option value="balanced" selected>Balanced</option>
-          <option value="aggressive">Aggressive</option>
-        </select></label>
+      <label>Profit target % (optional: stop when up this much)
+        <input type="number" id="profit_target_pct" step="0.1" min="0" placeholder="e.g. 50"></label>
       <label>Max position size (% of portfolio in one asset)
         <input type="number" id="max_position_pct" step="0.1" min="0.1" max="100" value="25"></label>
-      <label>Allowed blockchains (comma-separated, e.g. solana, ethereum, base)
-        <input type="text" id="allowed_chains" value="solana, ethereum, binance-smart-chain, base, polygon"></label>
-      <label>Decision time (UTC)
+      <label>Risk appetite (influences how the AI writes its plan)
+        <select id="risk_profile">
+          <option value="safe">Safe — prioritize capital preservation</option>
+          <option value="balanced" selected>Balanced</option>
+          <option value="aggressive">Aggressive — chase upside</option>
+        </select></label>
+      <label>Allowed blockchains (comma-separated)
+        <input type="text" id="allowed_chains" value="solana, ethereum, binance-smart-chain, base, polygon, arc"></label>
+      <label>Daily decision time (UTC)
         <input type="time" id="decision_time_utc" value="00:00"></label>
       <label>Custom prompt — instructions the AI reads before every decision
         <textarea id="custom_prompt" rows="5" placeholder="e.g. Avoid tokens less than 30 days old. Prefer high-liquidity pairs. Never hold more than 3 positions at once."></textarea></label>
-      <label>Autonomy mode
+      <label>Autonomy
         <select id="autonomy_mode">
-          <option value="constrained" selected>Constrained (recommended)</option>
-          <option value="full_control">Full control (no restrictions)</option>
+          <option value="constrained" selected>Constrained — respect all limits above</option>
+          <option value="full_control">Full control — ignore limits, maximize profit</option>
         </select></label>
       <div id="full-control-warning" class="warning hidden">
-        ⚠️ Full control removes ALL user constraints. The AI will decide everything with
-        profit maximization as its only objective. Only technical limits apply. Are you sure?
+        ⚠️ Full control removes ALL constraints except technical limits. Only technical limits apply. Are you sure?
       </div>
-      <button type="submit">Save settings</button>
+      <button type="submit">Save constraints</button>
     </form>
 
-    <h3 style="margin-top:28px">Watchlist — extra assets for the AI</h3>
-    <p class="hint">Beyond the built-in meme coins, the AI will analyze and price any asset you add here.
-      Data comes from DexScreener (all DEX pairs incl. the Arc ecosystem). You can enter token
-      <b>contract addresses</b> (e.g. <code>0x171a4217b86a807a64eb94757db6849fb4bdbaa0</code> = cirBTC on Arc)
-      or search names/symbols (e.g. <code>circle-wrapped-btc</code>). Comma-separated, up to 30.</p>
-    <form id="watchlist-form">
-      <label>Extra asset ids (CoinGecko)
-        <input type="text" id="watchlist-ids" placeholder="circle-wrapped-btc, bitcoin, ethereum"></label>
-      <div id="watchlist-status" class="hint"></div>
-      <button type="submit">Save watchlist</button>
-    </form>
-
-    <h3 style="margin-top:28px">Live Trading (Phase 2)</h3>
-    <p class="hint">Currently in <b id="current-mode">PAPER</b> mode. Live mode trades real funds on a
-      real exchange via CCXT. Requirements: API keys with <b>trade-only permission, withdrawals DISABLED</b>.
-      Meme coins are extremely volatile — only go live after validating the AI in paper mode.</p>
-    <form id="secrets-form">
-      <label>Exchange id (CCXT, e.g. binance, kraken, bybit)
-        <input type="text" id="exchange_id" placeholder="binance"></label>
-      <label>API key
-        <input type="password" id="api_key" autocomplete="off"></label>
-      <label>API secret
-        <input type="password" id="api_secret" autocomplete="off"></label>
-      <label>API password (only if your exchange requires one)
-        <input type="password" id="api_password" autocomplete="off"></label>
-      <div id="secrets-status" class="hint"></div>
-      <button type="submit">Save credentials (encrypted at rest)</button>
-      <button type="button" id="btn-delete-secrets" class="danger">Delete stored credentials</button>
-    </form>
-    <h3 style="margin-top:28px">On-chain Wallet (Mode B)</h3>
-    <p class="hint">Import a hot wallet private key and the app trades directly on DEXs
-      (Uniswap/PancakeSwap on EVM chains, Jupiter on Solana) — no exchange account needed.
-      The key is stored encrypted and used only for signing. TON is not enabled yet.
-      Robinhood and other custodial brokers cannot be linked (no key exists to import).</p>
+    <h3 style="margin-top:28px">3 · Wallet (real money mode)</h3>
+    <p class="hint">Import your hot wallet once. The key is stored encrypted and used only for signing.
+      One <b>EVM key works on all EVM chains</b> (Ethereum, Base, Polygon, BSC, Arc) — same address everywhere.
+      Solana needs its own key (different cryptography).</p>
     <form id="wallet-form">
-      <label>Chain
+      <label>Wallet type
         <select id="wallet-chain">
-          <option value="ethereum">Ethereum</option>
-          <option value="base">Base</option>
-          <option value="polygon">Polygon</option>
-          <option value="binance-smart-chain">BSC</option>
-          <option value="arc">Arc (Circle)</option>
-          <option value="solana">Solana</option>
+          <option value="evm">EVM multi-chain (Ethereum, Base, Polygon, BSC, Arc) — one key for all</option>
+          <option value="solana">Solana (separate key)</option>
         </select></label>
       <label>Private key (EVM: hex with 0x · Solana: base58 or JSON byte array)
         <input type="password" id="wallet-key" autocomplete="off"></label>
@@ -133,14 +113,18 @@
       <button type="submit">Import wallet</button>
       <button type="button" id="btn-wallet-delete" class="danger">Remove wallet from app</button>
     </form>
-    <div class="controls">
-      <button id="btn-go-live" class="danger">🔴 Go LIVE</button>
-      <button id="btn-go-paper" class="hidden">← Back to paper mode</button>
-    </div>
-    <div id="live-warning" class="warning hidden">
-      ⚠️ LIVE MODE: the AI will trade REAL money on your exchange account within your constraints.
-      Max loss, allowed chains and position limits are still enforced in code, but real funds are at risk.
-    </div>
+
+    <h3 style="margin-top:28px">4 · Watchlist — extra assets for the AI</h3>
+    <p class="hint">Beyond the built-in meme coins, the AI will analyze and price any asset you add here.
+      Data comes from DexScreener (all DEX pairs incl. the Arc ecosystem). Enter token
+      <b>contract addresses</b> (e.g. <code>0x171a4217b86a807a64eb94757db6849fb4bdbaa0</code> = cirBTC on Arc)
+      or names/symbols. Comma-separated, up to 30.</p>
+    <form id="watchlist-form">
+      <label>Extra assets
+        <input type="text" id="watchlist-ids" placeholder="0x171a4217b86a807a64eb94757db6849fb4bdbaa0, USYC, EURC"></label>
+      <div id="watchlist-status" class="hint"></div>
+      <button type="submit">Save watchlist</button>
+    </form>
   </section>
 
   <section id="news" class="panel">

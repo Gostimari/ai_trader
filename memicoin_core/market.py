@@ -146,7 +146,7 @@ class MarketDataModule:
 
     def _ds_token_pairs(self, addresses: list[str]) -> list[dict]:
         url = "https://api.dexscreener.com/tokens/v1/dexscreener/" + ",".join(addresses)
-        resp = requests.get(url, timeout=TIMEOUT, headers={"\"User-Agent\": USER_AGENT}"})
+        resp = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()
         data = resp.json()
         return data if isinstance(data, list) else []
