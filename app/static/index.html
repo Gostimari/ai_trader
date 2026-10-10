@@ -21,7 +21,6 @@
 <nav>
   <button data-tab="portfolio" class="tab active">Portfolio</button>
   <button data-tab="decisions" class="tab">Decision Feed</button>
-  <button data-tab="market" class="tab">Market</button>
   <button data-tab="settings" class="tab">Goals &amp; Constraints</button>
   <button data-tab="news" class="tab">News</button>
 </nav>
@@ -48,19 +47,6 @@
     <p class="hint">Every AI decision — executed or rejected — with the reason why. Full transparency.</p>
     <table id="decisions-table">
       <thead><tr><th>Time</th><th>Action</th><th>Asset</th><th>Amount</th><th>Value $</th><th>P&L/trade $</th><th>Status</th><th>Reason</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
-
-  <section id="market" class="panel">
-    <div class="chain-filter">
-      <span class="hint">Chains:</span>
-      <div id="chain-chips"></div>
-      <button id="btn-chain-all" class="chip all active">All</button>
-    </div>
-    <p class="hint">Filter is view-only — the AI decision engine and portfolio valuation always use full market data.</p>
-    <table id="market-table">
-      <thead><tr><th>Asset</th><th>Chain</th><th>Price $</th><th>24h %</th><th>7d %</th><th>Vol 24h $</th><th>Mkt Cap $</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>

@@ -307,51 +307,21 @@ class TestMarketChainAttribution:
         assert MarketDataModule._cg_platform({"id": "mystery"}) == "ethereum"
 
 
-class TestMarketChainFilterAPI:
-    def test_filter_returns_only_selected_chains(self, db, monkeypatch):
+class TestMarketRemovedFromUI:
+    def test_public_market_endpoint_removed(self, db, monkeypatch):
         import app.server as srv
         from fastapi.testclient import TestClient
-        all_assets = [
-            {"asset": "BONK", "chain": "solana", "price_usd": 1},
-            {"asset": "SHIB", "chain": "ethereum", "price_usd": 2},
-            {"asset": "BRETT", "chain": "base", "price_usd": 3},
-        ]
-        monkeypatch.setattr(srv.market, "get_market_overview", lambda force=False: list(all_assets))
-        c = TestClient(srv.app)
-        r = c.get("/api/market?chains=solana,base")
-        assert r.status_code == 200
-        chains = {a["chain"] for a in r.json()["assets"]}
-        assert chains == {"solana", "base"}
-        assert "ethereum" in r.json()["available_chains"]
-
-    def test_no_filter_returns_all_and_persists_empty(self, db, monkeypatch):
-        import app.server as srv
-        from fastapi.testclient import TestClient
-        all_assets = [{"asset": "BONK", "chain": "solana", "price_usd": 1},
-                      {"asset": "SHIB", "chain": "ethereum", "price_usd": 2}]
-        monkeypatch.setattr(srv.market, "get_market_overview", lambda force=False: list(all_assets))
+        calls = []
+        monkeypatch.setattr(srv.market, "get_market_overview",
+                            lambda force=False: calls.append(1) or [])
         c = TestClient(srv.app)
         r = c.get("/api/market")
-        assert len(r.json()["assets"]) == 2
-        assert srv.db.get_setting("market_chain_filter") == []
+        assert r.status_code == 404
+        assert calls == []  # market data only fetched internally by the engine
 
-    def test_filter_persisted_and_exposed_in_state(self, db, monkeypatch):
-        import app.server as srv
-        from fastapi.testclient import TestClient
-        monkeypatch.setattr(srv.market, "get_market_overview",
-                            lambda force=False: [{"asset": "BONK", "chain": "solana", "price_usd": 1}])
-        c = TestClient(srv.app)
-        c.get("/api/market?chains=solana")
-        s = c.get("/api/state").json()
-        assert s["market_chain_filter"] == ["solana"]
-
-    def test_filter_is_view_only_engine_sees_full_data(self, db, monkeypatch):
-        import app.server as srv
-        from fastapi.testclient import TestClient
-        all_assets = [{"asset": "BONK", "chain": "solana", "price_usd": 1},
-                      {"asset": "SHIB", "chain": "ethereum", "price_usd": 2}]
-        monkeypatch.setattr(srv.market, "get_market_overview", lambda force=False: list(all_assets))
-        c = TestClient(srv.app)
-        c.get("/api/market?chains=solana")
-        prices = srv.market.get_prices()
-        assert prices == {"BONK": 1, "SHIB": 2}
+    def test_dashboard_has_no_market_section(self):
+        html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
+        assert 'id="market"' not in html
+        assert 'id="market-table"' not in html
+        js = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "app.js")).read()
+        assert "api/market" not in js
