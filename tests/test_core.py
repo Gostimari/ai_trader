@@ -637,35 +637,65 @@ class TestWatchlist:
         assert r.json()["asset_ids"] == ["bitcoin", "ethereum"]
         assert c.get("/api/watchlist").json()["asset_ids"] == ["bitcoin", "ethereum"]
 
-    def test_coingecko_fetch_includes_watchlist(self, db, monkeypatch):
+    def test_dexscreener_primary_includes_watchlist_addresses(self, db, monkeypatch):
         import memicoin_core.market as market_mod
-        captured = {}
+        searched = []
+        token_pair_calls = []
 
         class _FakeReq:
             @staticmethod
             def get(url, params=None, timeout=None, headers=None):
-                captured["params"] = params
-
-                class _R:
-                    status_code = 200
-
-                    def raise_for_status(self): pass
-
-                    def json(self):
-                        return [{"symbol": "CIRBTC", "name": "Circle Wrapped BTC",
-                                 "current_price": 83000, "market_cap": 1, "total_volume": 1,
-                                 "price_change_percentage_24h": 1, "id": "circle-wrapped-btc",
-                                 "platforms": {}}]
-
-                return _R()
+                if "/latest/dex/search" in url:
+                    searched.append(params["q"])
+                    class _R:
+                        status_code = 200
+                        def raise_for_status(self): pass
+                        def json(self):
+                            return {"pairs": [
+                                {"chainId": "arc", "baseToken": {"symbol": "CIRBTC",
+                                                                 "name": "Circle Wrapped BTC",
+                                                                 "address": "0x171a"},
+                                 "quoteTokenSymbol": "USDC", "priceUsd": "83000",
+                                 "marketCap": "1", "fdv": None,
+                                 "volume": {"h24": 100}, "priceChange": {"h24": 2, "h7": 3},
+                                 "liquidity": {"usd": 50}}]}
+                    return _R()
+                if "/tokens/v1/dexscreener/" in url:
+                    token_pair_calls.append(url)
+                    class _R2:
+                        status_code = 200
+                        def raise_for_status(self): pass
+                        def json(self):
+                            return [{"chainId": "arc",
+                                     "baseToken": {"symbol": "USYC", "name": "USYC", "address": "0x2222"},
+                                     "quoteTokenSymbol": "USDC", "priceUsd": "1.05",
+                                     "volume": {"h24": 5}, "priceChange": {"h24": 0.1, "h7": 0.2},
+                                     "liquidity": {"usd": 10}}]
+                    return _R2()
+                class _R3:
+                    status_code = 500
+                    def raise_for_status(self): raise RuntimeError("no cg")
+                    def json(self): return {}
+                return _R3()
 
         monkeypatch.setattr(market_mod, "requests", _FakeReq)
-        db.set_setting("extra_asset_ids", ["circle-wrapped-btc"])
+        db.set_setting("extra_asset_ids",
+                       ["0x171a4217b86a807a64eb94757db6849fb4bdbaa0"])
         m = market_mod.MarketDataModule(db)
         assets = m.get_market_overview(force=True)
-        assert "circle-wrapped-btc" in captured["params"]["ids"]
-        cir = [a for a in assets if a["asset"] == "CIRBTC"][0]
-        assert cir["chain"] == "arc"
+        by_sym = {a["asset"]: a for a in assets}
+        assert "CIRBTC" in by_sym and by_sym["CIRBTC"]["chain"] == "arc"
+        assert "USYC" in by_sym  # resolved via batch token-pairs endpoint
+        assert any("0x171a4217" in u for u in token_pair_calls)
+        # snapshot stored with dexscreener source
+        snap = db.latest_market_snapshot()
+        assert snap["source"] == "dexscreener"
+
+    def test_watchlist_accepts_addresses_and_ids(self):
+        from memicoin_core.market import _is_address
+        assert _is_address("0x171a4217b86a807a64eb94757db6849fb4bdbaa0")
+        assert not _is_address("circle-wrapped-btc")
+        assert not _is_address("bitcoin")
 
     def test_arc_in_default_allowed_chains(self):
         assert "arc" in Constraints().allowed_chains

@@ -84,9 +84,10 @@
     </form>
 
     <h3 style="margin-top:28px">Watchlist — extra assets for the AI</h3>
-    <p class="hint">Beyond the built-in meme coins, the AI will analyze and price any CoinGecko-listed
-      assets you add here (e.g. <code>circle-wrapped-btc</code> for cirBTC on Arc, <code>bitcoin</code>,
-      <code>ethereum</code>). Enter CoinGecko asset ids, comma-separated.</p>
+    <p class="hint">Beyond the built-in meme coins, the AI will analyze and price any asset you add here.
+      Data comes from DexScreener (all DEX pairs incl. the Arc ecosystem). You can enter token
+      <b>contract addresses</b> (e.g. <code>0x171a4217b86a807a64eb94757db6849fb4bdbaa0</code> = cirBTC on Arc)
+      or search names/symbols (e.g. <code>circle-wrapped-btc</code>). Comma-separated, up to 30.</p>
     <form id="watchlist-form">
       <label>Extra asset ids (CoinGecko)
         <input type="text" id="watchlist-ids" placeholder="circle-wrapped-btc, bitcoin, ethereum"></label>
