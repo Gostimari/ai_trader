@@ -2601,3 +2601,26 @@ class TestDemoBasisAndClear:
         row = s["wallet_view"]["chains"]["base"][0]
         assert row["value_usd"] == pytest.approx(0.6)  # symbol price survived
         db.demo_clear()
+
+
+class TestGasFundedPercentBuys:
+    def test_percent_buy_on_eth_only_chain_resolves(self, db, monkeypatch):
+        # the user's PEPE case: ethereum holds only ETH (gas), no USDC
+        from memicoin_core.constraints import resolve_action_amount
+        from memicoin_core.portfolio import PortfolioTracker
+        from memicoin_core.demowallet import DemoWallet
+        db.demo_mode_percent = True
+        db.demo_set("ethereum", "ETH", 0.10, is_gas=True)  # above the reserve
+        class _M:
+            def get_prices_for_addresses(self, contracts):
+                return {"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": 2500.0}
+        v = ConstraintValidator(db, Constraints(), market=_M())
+        prices = {"PEPE": 2.68e-05}
+        action = {"type": "buy", "asset": "PEPE", "amount_or_percent": "10%",
+                  "_chain": "ethereum", "_price": 2.68e-05}
+        qty = v._resolve_amount(action, prices)
+        assert qty is not None and qty > 0
+        spendable = (0.10 - DemoWallet(db).gas_reserve("ethereum")) * 2500.0
+        assert qty == pytest.approx(spendable * 0.10 / 2.68e-05)
+        db.demo_mode_percent = False
+        db.demo_clear()

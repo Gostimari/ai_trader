@@ -20,7 +20,7 @@ class ValidationResult:
 
 
 def resolve_action_amount(action: dict, prices: dict[str, float],
-                           tracker, db) -> float | None:
+                           tracker, db, market=None) -> float | None:
     """Resolve an action's amount_or_percent into absolute asset units.
     Raises nothing; returns None when unresolvable."""
     raw = action.get("amount")
@@ -51,15 +51,31 @@ def resolve_action_amount(action: dict, prices: dict[str, float],
         total = tracker.total_value(prices)
         price = prices.get(asset, 0.0)
         if getattr(db, "demo_mode_percent", False):
-            from .demowallet import DemoWallet
+            from .demowallet import DemoWallet, NATIVE_WRAPPED
             demo = DemoWallet(db)
             chain = action.get("_chain", "")
+            # price gas tokens via wrapped contracts (ETH not in symbol map)
+            wrapped_needed = [NATIVE_WRAPPED[r["chain"]] for r in demo.rows()
+                             if r["is_gas"] and r["chain"] in NATIVE_WRAPPED
+                             and r["chain"] != "arc"]
+            wrapped_prices: dict = {}
+            if wrapped_needed and market is not None:
+                try:
+                    wrapped_prices = market.get_prices_for_addresses(wrapped_needed)
+                except Exception:
+                    wrapped_prices = {}
             spendable_usd = 0.0
             for r in demo.rows():
                 if chain and r["chain"] != chain:
                     continue  # fund from the token's chain when known; else all
                 if r["is_gas"]:
-                    p = prices.get(r["asset"], 0.0) or (1.0 if r["asset"] == "USDC" else 0.0)
+                    if r["chain"] == "arc":
+                        p = 1.0
+                    else:
+                        w = NATIVE_WRAPPED.get(r["chain"])
+                        p = prices.get(r["asset"], 0.0)
+                        if p <= 0 and w:
+                            p = wrapped_prices.get(w.lower(), 0.0)
                     spendable_usd += demo.investable_gas(r["chain"]) * p
                 else:
                     p = prices.get(r["asset"], 0.0) or (1.0 if r["asset"] in ("USDC", "USDT") else 0.0)
@@ -170,6 +186,12 @@ class ConstraintValidator:
             return r
 
         if amount is None or amount <= 0:
+            if getattr(self.db, "demo_mode_percent", False) and a_type == "buy":
+                return ValidationResult(
+                    False,
+                    f"No investable funds on the token's chain for this buy "
+                    f"(after the gas reserve); the position size resolved to "
+                    f"{amount if amount is not None else 'nothing'}.")
             return ValidationResult(False, "Missing or non-positive amount.")
 
         if a_type == "buy":
@@ -291,4 +313,5 @@ class ConstraintValidator:
         always checks the exact amount that will be traded.
         Percent strings: buys = % of current portfolio value;
         sells/swaps = % of current holdings of the asset."""
-        return resolve_action_amount(action, prices, self.tracker, self.db)
+        return resolve_action_amount(action, prices, self.tracker, self.db,
+                                     market=self._market)
