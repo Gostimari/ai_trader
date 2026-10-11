@@ -61,3 +61,8 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 .gas-pill { border-radius: 12px; padding: 4px 12px; font-size: .75rem; border: 1px solid var(--border); }
 .gas-pill.ok { background: #14351f; color: #7ee2a8; }
 .gas-pill.bad { background: #4a1f24; color: #ff9aa5; }
+
+.gas-warning { padding: 10px 22px; font-size: .82rem; border-bottom: 1px solid var(--border); }
+.gas-warning.critical { background: #4a1f24; color: #ff9aa5; }
+.gas-warning.low { background: #3a2c14; color: #f0c674; }
+.gas-warning .chain-line { margin: 2px 0; }

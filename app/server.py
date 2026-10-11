@@ -305,41 +305,66 @@ def wallet_balances():
                          "value_usd": 0.0, "chain": "solana", "kind": "token",
                          "contract": t.get("contract", t.get("address", ""))})
         chains["solana"] = rows
-    # gas health: can the wallet pay for transactions on each chain?
+    # gas health + warning levels per chain
+    # healthy: full reserve intact | low: < 2 swaps of headroom
+    # critical: < 1 swap left | empty: cannot transact at all
     gas_health = {}
+    warnings = []
+
+    def _classify(chain: str, balance: float, per_swap: float, symbol: str) -> dict:
+        swaps_left = balance / per_swap if per_swap > 0 else float("inf")
+        if balance <= 0:
+            level = "empty"
+        elif swaps_left < 1:
+            level = "critical"
+        elif swaps_left < 2:
+            level = "low"
+        else:
+            level = "healthy"
+        info = {"ok": level in ("healthy", "low"),
+                "level": level, "balance": balance, "symbol": symbol,
+                "per_swap": per_swap, "swaps_left": round(swaps_left, 1),
+                "reserve": per_swap * 3, "investable": max(0.0, balance - per_swap * 3),
+                "hint": ""}
+        if level == "empty":
+            info["hint"] = f"no {symbol} on {chain}: the bot cannot transact there. Top up {symbol}."
+        elif level == "critical":
+            info["hint"] = f"almost out of gas on {chain} ({balance:.6f} {symbol} = <1 transaction). Top up {symbol} now."
+        elif level == "low":
+            info["hint"] = f"gas running low on {chain} (~{swaps_left:.0f} transactions of {symbol} left). Consider topping up."
+        return info
+
     if secrets.has("onchain_private_key"):
         from memicoin_core.onchain import EVMWallet, EVM_CHAINS
         for chain in EVM_CHAINS:
             try:
                 w = EVMWallet(secrets, chain)
-                ok, why = w.gas_ok()
-                gas_health[chain] = {
-                    "ok": ok,
-                    "balance": w.gas_balance(),
-                    "symbol": EVM_CHAINS[chain].get("native_symbol", "ETH"),
-                    "needed": w.estimated_gas_cost() * 1.5,
-                    "reserve": w.gas_reserve(),
-                    "investable": w.investable_native(),
-                    "hint": why,
-                }
+                per_swap = w.estimated_gas_cost()
+                sym = EVM_CHAINS[chain].get("native_symbol", "ETH")
+                info = _classify(chain, w.gas_balance(), per_swap, sym)
+                # only warn for chains where the wallet actually has activity
+                chain_rows = chains.get(chain) or []
+                if info["level"] in ("empty", "critical", "low") and chain_rows:
+                    warnings.append({"chain": chain, "symbol": sym,
+                                     "level": info["level"], "hint": info["hint"]})
+                gas_health[chain] = info
             except Exception:
                 continue
     if secrets.has("onchain_solana_private_key"):
         try:
             from memicoin_core.onchain import SolanaWallet
             sw = SolanaWallet(secrets)
-            bal = sw.native_balance()
-            gas_health["solana"] = {
-                "ok": bal > 0.005,  # ~0.005 SOL covers a swap
-                "balance": bal, "symbol": "SOL", "needed": 0.005,
-                "hint": "" if bal > 0.005 else "top up a little SOL for fees",
-            }
+            info = _classify("solana", sw.native_balance(), 0.005, "SOL")
+            gas_health["solana"] = info
+            if info["level"] in ("empty", "critical", "low"):
+                warnings.append({"chain": "solana", "symbol": "SOL",
+                                 "level": info["level"], "hint": info["hint"]})
         except Exception:
             pass
     return {"configured": True, "evm_address": (evm or {}).get("address"),
             "solana_address": (sol or {}).get("address"),
             "chains": chains, "total_usd": total,
-            "gas": gas_health,
+            "gas": gas_health, "gas_warnings": warnings,
             "priced": bool(prices), "error": raw.get("error")}
 
 

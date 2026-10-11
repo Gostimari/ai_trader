@@ -307,6 +307,24 @@ function modeControls() {
 }
 
 
+function renderGasWarnings(gas) {
+  const el = $("#gas-warning");
+  if (!el) return;
+  const warns = gas || [];
+  if (!warns.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  const worst = warns.some((w) => w.level === "empty" || w.level === "critical") ? "critical" : "low";
+  el.className = "gas-warning " + worst;
+  el.innerHTML = "\u26fd Gas reserve warnings:<br>" +
+    warns.map((w) => `<div class="chain-line">\u2022 <b>${w.chain}</b>: ${w.hint}</div>`).join("");
+}
+
+async function checkGasWarnings() {
+  try {
+    const w = await api("/api/wallet/balances");
+    renderGasWarnings(w.gas_warnings);
+  } catch (e) { /* ignore */ }
+}
+
 async function loadWalletBalances() {
   const cards = $("#wallet-cards"), rowsEl = $("#wallet-balances"), hint = $("#wallet-hint");
   if (!cards) return;
@@ -331,7 +349,7 @@ async function loadWalletBalances() {
     // gas health strip
     const gas = w.gas || {};
     const gasRows = Object.entries(gas).map(([chain, g]) =>
-      `<span class="gas-pill ${g.ok ? "ok" : "bad"}">${chain}: ${fmt(g.balance, 5)} ${g.symbol} ${g.ok ? "\u2705 investable " + fmt(g.investable ?? g.balance, 5) : "\u26a0\ufe0f " + (g.hint || "low gas")}</span>`).join(" ");
+      `<span class="gas-pill ${g.ok ? "ok" : "bad"}">${chain}: ${fmt(g.balance, 5)} ${g.symbol} \u00b7 ~${g.swaps_left} txs left \u00b7 investable ${fmt(g.investable ?? 0, 5)} ${g.ok ? "\u2705" : "\u26a0\ufe0f " + (g.hint || "low gas")}</span>`).join(" ");
     const gasEl = $("#gas-health");
     if (gasEl) gasEl.innerHTML = gasRows
       ? "<div class=\"gas-strip\">" + gasRows + "</div>" : "";
@@ -476,5 +494,7 @@ async function main() {
   checkSetup();
   await Promise.all([loadState(), loadDecisions(), loadNews()]);
   setInterval(loadState, 60000);
+  checkGasWarnings();
+  setInterval(checkGasWarnings, 120000);
 }
 main();

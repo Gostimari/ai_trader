@@ -1738,3 +1738,63 @@ class TestGasReserve:
             "eth": type("Eth", (), {"gas_price": 20 * 10**9}),  # arc 20 gwei floor
         })()
         assert w.investable_native() < 1.0  # reserve held back on arc too
+
+
+class TestGasWarningSystem:
+    def test_classification_levels(self):
+        # exercise the classifier through the endpoint logic shape
+        # (mirrors _classify in server.py)
+        def classify(balance, per_swap):
+            swaps = balance / per_swap if per_swap > 0 else float("inf")
+            if balance <= 0: return "empty"
+            if swaps < 1: return "critical"
+            if swaps < 2: return "low"
+            return "healthy"
+        assert classify(0.0, 0.0075) == "empty"
+        assert classify(0.005, 0.0075) == "critical"   # <1 swap
+        assert classify(0.012, 0.0075) == "low"        # 1.6 swaps
+        assert classify(0.5, 0.0075) == "healthy"
+
+    def test_endpoint_reports_warnings_and_levels(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses", lambda c: {})
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                           lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0.004,  # critical
+                         "tokens": [{"symbol": "BRETT", "contract": "0x1", "balance": 5.0}]},
+                "ethereum": {"native_symbol": "ETH", "native": 0.5,  # healthy
+                             "tokens": []},
+            }}, "solana": None})
+        class _FakeW:
+            def __init__(self, s, chain): self.chain = chain
+            def gas_balance(self):
+                return {"base": 0.004, "ethereum": 0.5}[self.chain]
+            def estimated_gas_cost(self): return 0.0075
+            def gas_ok(self): return True, ""
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        c = TestClient(srv.app)
+        d = c.get("/api/wallet/balances").json()
+        assert d["gas"]["base"]["level"] == "critical"
+        assert d["gas"]["base"]["swaps_left"] == pytest.approx(0.5, abs=0.1)
+        assert d["gas"]["ethereum"]["level"] == "healthy"
+        warned = {w["chain"] for w in d["gas_warnings"]}
+        assert "base" in warned            # has tokens -> warns
+        assert "ethereum" not in warned    # healthy + no tokens -> no warn
+        assert any("Top up" in w["hint"] or "out of gas" in w["hint"] for w in d["gas_warnings"])
+
+    def test_no_warning_without_wallet(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: False)
+        c = TestClient(srv.app)
+        d = c.get("/api/wallet/balances").json()
+        assert d["configured"] is False
+        assert d.get("gas_warnings", []) == []
