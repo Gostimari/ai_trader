@@ -263,6 +263,9 @@ class _FakeMarket:
     def __init__(self):
         self.snap_id = "s1"
 
+    def get_prices_for_addresses(self, contracts):
+        return {}
+
     def get_prices(self, force=False):
         return dict(PRICES)
 
@@ -2015,4 +2018,89 @@ class TestDemoUsdAmounts:
             "chain": "ethereum", "asset": "ETH", "balance": 0.02,
             "is_gas": True, "amount_is_usd": False})
         assert r.json()["stored_balance"] == pytest.approx(0.02)
+        db.demo_clear()
+
+
+class TestDemoCycleIntegration:
+    def _demo_engine(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="demo",
+                        max_position_pct=25.0)
+        return DecisionEngine(db, c, _FakeMarket(), None)
+
+    def test_ai_context_shows_demo_wallet(self, db, monkeypatch):
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        engine = self._demo_engine(db)
+        captured = {}
+        def fake_call(prompt):
+            captured["p"] = prompt
+            return json.dumps({"analysis_summary": "h", "actions": [],
+                              "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", fake_call)
+        engine.run_cycle()
+        p = captured["p"]
+        assert "DEMO wallet" in p
+        assert "USDC" in p and "arc" in p
+        assert "investable gas" in p
+        db.demo_clear()
+
+    def test_buy_funded_by_usdc_when_present(self, db, monkeypatch):
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        db.demo_set("base", "USDC", 100.0)
+        engine = self._demo_engine(db)
+        # BRETT on base at $0.006: buy 1000 tokens = $6
+        prices = {"BRETT": 0.006, "USDC": 1.0}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        BRETT_C = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: {"BRETT": {"asset": "BRETT", "chain": "base",
+                                                           "contract": BRETT_C}})
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda c: {})
+        err = engine._execute_demo("cx", {"type": "buy", "asset": "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+                                          "amount": 1000, "reason": "r"},
+                                   "0x532f", 1000.0)
+        assert err is None, err
+        assert db.demo_get("base", "USDC")["balance"] == pytest.approx(94.0)
+        assert db.demo_get("base", "BRETT", "0x532f27101965dd16442E59d40670FaF5eBB142E4")["balance"] == pytest.approx(1000.0)
+        db.demo_clear()
+
+    def test_buy_funded_by_investable_gas_when_no_usdc(self, db, monkeypatch):
+        # user's scenario: only ETH on base, no USDC
+        db.demo_set("base", "ETH", 0.05, is_gas=True)
+        engine = self._demo_engine(db)
+        prices = {"BRETT": 0.006, "ETH": 2500.0}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        BRETT_C = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: {"BRETT": {"asset": "BRETT", "chain": "base",
+                                                           "contract": BRETT_C}})
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda c: {})
+        # buy $30 of BRETT; investable ETH = 0.05 - 0.00045 = ~$124 -> enough
+        err = engine._execute_demo("cx", {"type": "buy", "asset": "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+                                          "amount": 5000, "reason": "r"},
+                                   "0x532f", 5000.0)
+        assert err is None, err
+        eth_after = db.demo_get("base", "ETH")["balance"]
+        assert eth_after == pytest.approx(0.05 - 30.0 / 2500.0 - 0.00015, rel=1e-4)
+        assert db.demo_get("base", "BRETT", "0x532f27101965dd16442E59d40670FaF5eBB142E4")["balance"] == pytest.approx(5000.0)
+        db.demo_clear()
+
+    def test_buy_refused_insufficient_all_sources(self, db, monkeypatch):
+        db.demo_set("base", "ETH", 0.001, is_gas=True)  # below reserve anyway
+        engine = self._demo_engine(db)
+        prices = {"BRETT": 0.006, "ETH": 2500.0}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        BRETT_C = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: {"BRETT": {"asset": "BRETT", "chain": "base",
+                                                           "contract": BRETT_C}})
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda c: {})
+        err = engine._execute_demo("cx", {"type": "buy", "asset": "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+                                          "amount": 50000, "reason": "r"},
+                                   "0x532f", 50000.0)
+        assert err is not None
+        assert "insufficient funds" in err or "gas" in err
         db.demo_clear()

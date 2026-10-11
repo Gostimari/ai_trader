@@ -115,6 +115,9 @@ class DecisionEngine:
             prices = self.market.get_prices(force=True)
             assets = self.market.get_asset_map(force=True)
             portfolio = self.tracker.summary(prices)
+            if (not self.constraints.paper_trading
+                    and self.constraints.live_execution_mode == "demo"):
+                portfolio = self._demo_portfolio_summary(prices)
         except MarketDataError as e:
             self.db.finish_cycle(cycle_id, "failed", "", "", error=f"market data: {e}")
             self.db.add_decision({"cycle_id": cycle_id, "action": "hold",
@@ -266,6 +269,37 @@ class DecisionEngine:
         return sold
 
     # ---------- context & AI call ----------
+    def _demo_portfolio_summary(self, prices: dict[str, float]) -> dict:
+        """Portfolio state built from the DEMO wallet (what the AI must see
+        in demo mode), with per-chain investable amounts."""
+        from .demowallet import DemoWallet
+        demo = DemoWallet(self.db)
+        rows = demo.rows()
+        by_chain: dict = {}
+        total = 0.0
+        for r in rows:
+            p = prices.get(r["asset"].upper(), 0.0)
+            if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
+                p = 1.0
+            entry = {"asset": r["asset"], "chain": r["chain"],
+                     "quantity": r["balance"], "is_gas": bool(r["is_gas"]),
+                     "value_usd": r["balance"] * p}
+            by_chain.setdefault(r["chain"], []).append(entry)
+            total += entry["value_usd"]
+        # investable gas per chain (balance minus reserve)
+        for chain, entries in by_chain.items():
+            inv = demo.investable_gas(chain)
+            reserve = demo.gas_reserve(chain)
+            per_swap = demo.per_tx_gas(chain)
+            entries.append({"_meta": True, "note":
+                            f"investable gas on {chain}: {inv:.6f} "
+                            f"(reserve {reserve:.6f} = {per_swap:.6f}/tx kept for fees)"})
+        return {"demo_wallet": True, "chains": by_chain,
+                "total_value_usd": total,
+                "note": "Portfolio is the DEMO wallet. Fund buys with USDC "
+                        "where available, or with investable gas-token amounts. "
+                        "Buys settle against these balances (simulated)."}
+
     def _build_context(self, prices: dict[str, float], assets: dict[str, dict],
                        portfolio: dict) -> str:
         c = self.constraints
@@ -445,24 +479,60 @@ class DecisionEngine:
             return (f"demo/on-chain swap needs a token contract address for {token!r}; "
                     f"the AI must provide contract/mint addresses")
         assets = self.market.get_asset_map()
+        # the AI may reference the token by symbol OR contract; resolve both
         info = assets.get(asset)
+        if info is None:
+            # asset is likely a contract: find it in the asset map
+            for a in assets.values():
+                if (a.get("contract") or "").lower() == token.lower():
+                    info = a
+                    break
         chain = (info or {}).get("chain") or self.constraints.onchain_chain
         prices = self.market.get_prices()
+        # price by the resolved symbol when possible, else by contract
         price_to = prices.get(asset, 0.0)
+        if price_to <= 0 and info:
+            price_to = prices.get(info.get("asset", ""), 0.0)
+        if price_to <= 0:
+            try:
+                addr_prices = self.market.get_prices_for_addresses([token])
+                price_to = addr_prices.get(token.lower(), 0.0)
+            except Exception:
+                pass
         if price_to <= 0:
             return f"no reliable price for {asset}: refusing demo trade"
         ok, why = demo.gas_ok(chain)
         if not ok:
             return f"gas check failed on {chain}: {why}"
+        # funding: prefer USDC on the chain; fall back to the investable
+        # portion of the gas token (mirrors real wallets where ETH is the
+        # spendable asset after the gas reserve)
         stable = "USDC"
         stable_price = prices.get(stable, 1.0) or 1.0
+        cost_usd = amount * price_to
+        usdc_qty = demo.balance(chain, stable)
+        usd_have = usdc_qty * stable_price
+        gas_symbol = demo._gas_symbol(chain)
+        gas_price = prices.get(gas_symbol, 0.0)
+        if gas_price <= 0 and gas_symbol == "USDC":
+            gas_price = 1.0
+        investable_gas_qty = demo.investable_gas(chain)
+        symbol = (info or {}).get("asset", asset)  # human symbol when known
         if action["type"] == "buy":
-            cost_usd = amount * price_to
-            ok, msg = demo.swap(chain, stable, "", asset, token,
-                                cost_usd / max(stable_price, 1e-9),
-                                stable_price, price_to)
+            if usd_have + 1e-9 >= cost_usd:
+                ok, msg = demo.swap(chain, stable, "", symbol, token,
+                                    cost_usd / max(stable_price, 1e-9),
+                                    stable_price, price_to)
+            elif gas_price > 0 and investable_gas_qty * gas_price + 1e-9 >= cost_usd:
+                # spend investable gas token instead (e.g. ETH on base)
+                ok, msg = demo.swap(chain, gas_symbol, "", symbol, token,
+                                    cost_usd / gas_price, gas_price, price_to)
+            else:
+                return (f"demo execution failed on {chain}: insufficient funds "
+                        f"(USDC ${usd_have:.2f}, investable {gas_symbol} "
+                        f"${investable_gas_qty * gas_price:.2f} < ${cost_usd:.2f})")
         else:
-            ok, msg = demo.swap(chain, asset, token, stable, "",
+            ok, msg = demo.swap(chain, symbol, token, stable, "",
                                 amount, price_to, stable_price)
         if not ok:
             return f"demo execution failed on {chain}: {msg}"
