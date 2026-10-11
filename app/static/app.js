@@ -72,12 +72,6 @@ async function loadDecisions() {
     || `<tr><td colspan="8" class="hint">No decisions yet.</td></tr>`;
 }
 
-async function loadNews() {
-  const n = await api("/api/news");
-  $("#news-list").innerHTML = n.news.map((x) => `
-    <li>${x.url ? `<a href="${x.url}" target="_blank">${x.title}</a>` : x.title}
-    <div class="src">${x.source}${x.published ? " · " + x.published.slice(0, 10) : ""}</div></li>`).join("");
-}
 
 function controls() {
   $("#btn-cycle").addEventListener("click", async () => {
