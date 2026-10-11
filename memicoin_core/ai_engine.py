@@ -49,8 +49,12 @@ class AIDecision(BaseModel):
     @field_validator("actions")
     @classmethod
     def _cap_actions(cls, v):
+        # CLAMP, never invalidate: an enthusiastic response with more
+        # actions than the cap keeps the first MAX_ACTIONS_PER_CYCLE
+        # (all still go through validation). Discarding a whole cycle
+        # over action count turned good decisions into holds.
         if len(v) > MAX_ACTIONS_PER_CYCLE:
-            raise ValueError(f"Too many actions ({len(v)} > {MAX_ACTIONS_PER_CYCLE})")
+            v = v[:MAX_ACTIONS_PER_CYCLE]
         return v
 
 

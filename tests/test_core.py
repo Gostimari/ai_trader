@@ -2727,3 +2727,20 @@ class TestSwapByContractAndGasFunding:
         assert eth_after == pytest.approx(0.0197 - 100000 * 2.68e-05 / 2500.0 - 0.0075, rel=1e-3)
         assert db.demo_get("ethereum", "PEPE", PEPE_C)["balance"] == pytest.approx(100000.0)
         db.demo_clear()
+
+
+class TestActionCapClamps:
+    def test_seven_actions_clamped_not_invalidated(self, db, monkeypatch):
+        # the user's exact failure: aggressive mode proposed 7 actions
+        db.set_cash(100.0)
+        c = Constraints(risk_profile="aggressive")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        actions = [{"type": "buy", "asset": sym, "amount_or_percent": 5, "reason": "r"}
+                   for sym in ("DOGE", "SHIB", "PEPE", "BONK", "FLOKI", "MEW", "TURBO")]
+        ai_out = json.dumps({"analysis_summary": "aggressive",
+                             "actions": actions, "confidence": "high"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        # NOT 'invalid': the first 6 actions ran through validation
+        assert result["status"] == "completed"
+        assert len(result["executed"]) + len(result["rejected"]) + len(result["failed"]) == 6
