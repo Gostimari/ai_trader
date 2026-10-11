@@ -49,10 +49,13 @@ function renderWalletPortfolio(w, mode) {
     <div class="card"><div class="k">${label} total</div><div class="v">$${fmt(total)}</div></div>
     <div class="card"><div class="k">Chains</div><div class="v">${Object.keys(w.chains || {}).length}</div></div>
     <div class="card"><div class="k">Assets</div><div class="v">${all.length}</div></div>
-    <div class="card"><div class="k">Mode</div><div class="v">${mode === "demo" ? "DEMO" : "REAL"}</div></div>`;
+    <div class="card"><div class="k">Mode</div><div class="v">${mode === "demo" ? "DEMO" : "REAL"}</div></div>
+    ${w.total_pnl_usd != null ? `<div class="card"><div class="k">Bot P&L (vs cost)</div><div class="v ${pnlClass(w.total_pnl_usd)}">$${fmt(w.total_pnl_usd)}</div></div>` : ""}`;
   $("#positions-table tbody").innerHTML = all.sort((a, b) => b.value_usd - a.value_usd).map((r) => `
     <tr><td>${r.symbol}${r.kind === "gas" ? " \u26fd" : ""}</td><td>${r.chain}</td><td>${fmt(r.balance, 6)}</td>
-    <td>$${fmt(r.value_usd)}</td><td>-</td><td>-</td></tr>`).join("")
+    <td>$${fmt(r.value_usd)}</td>
+    <td class="${pnlClass(r.pnl_usd || 0)}">${r.pnl_usd == null ? "-" : "$" + fmt(r.pnl_usd)}</td>
+    <td class="${pnlClass(r.pnl_pct || 0)}">${r.pnl_pct == null ? "-" : fmt(r.pnl_pct, 1) + "%"}</td></tr>`).join("")
     || `<tr><td colspan="6" class="hint">Wallet empty.</td></tr>`;
 }
 

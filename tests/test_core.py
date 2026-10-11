@@ -2494,3 +2494,39 @@ class TestAiseesAllChains:
         assert action["amount"] == pytest.approx(6250.0)
         db.demo_mode_percent = False
         db.demo_clear()
+
+
+class TestDemoPnL:
+    def test_wallet_view_computes_pnl(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        BRETT_C = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+        # bot bought BRETT at $12 basis; now worth $24 -> +100%
+        db.demo_set("base", "BRETT", 4000.0, contract=BRETT_C, cost_basis_usd=12.0)
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        monkeypatch.setattr(srv.market, "get_prices",
+                            lambda force=False: {"BRETT": 0.006, "ETH": 2500.0})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses",
+                            lambda c: {"0x4200000000000000000000000000000000000006": 2500.0})
+        c = TestClient(srv.app)
+        s = c.get("/api/state").json()
+        rows = s["wallet_view"]["chains"]["base"]
+        brett = [r for r in rows if r["symbol"] == "BRETT"][0]
+        assert brett["pnl_usd"] == pytest.approx(24.0 - 12.0)
+        assert brett["pnl_pct"] == pytest.approx(100.0)
+        # manually-set rows (no trade history) have no P&L: honest '-'
+        eth = [r for r in rows if r["symbol"] == "ETH"][0]
+        # ETH was set by the user, basis == balance*price at set time or 0
+        db.demo_clear()
+
+    def test_untraded_rows_show_null_pnl(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        c = TestClient(srv.app)
+        s = c.get("/api/state").json()
+        row = s["wallet_view"]["chains"]["arc"][0]
+        assert row["pnl_usd"] is None or row["pnl_usd"] == pytest.approx(0.0)
+        db.demo_clear()

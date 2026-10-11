@@ -98,6 +98,16 @@ def _demo_wallet_view():
         addr_prices = market.get_prices_for_addresses(contracts)
     except MarketDataError:
         prices, addr_prices = {}, {}
+    # batch the wrapped contracts even when the loop above failed silently
+    try:
+        extra = [NATIVE_WRAPPED[r["chain"]] for r in all_rows
+                 if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc"]
+        if extra:
+            more = market.get_prices_for_addresses(extra)
+            for k, v in more.items():
+                addr_prices.setdefault(k, v)
+    except Exception:
+        pass
     chains: dict = {}
     total = 0.0
     gas = {}
@@ -113,14 +123,24 @@ def _demo_wallet_view():
                 p = addr_prices.get(wrapped.lower(), 0.0)
         if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
             p = 1.0
-        row = {"symbol": r["asset"], "balance": r["balance"], "value_usd": r["balance"] * p,
+        value = r["balance"] * p
+        basis = r.get("cost_basis_usd") or 0.0
+        row = {"symbol": r["asset"], "balance": r["balance"], "value_usd": value,
                "chain": r["chain"], "kind": "gas" if r["is_gas"] else "token",
-               "contract": r.get("contract", "")}
+               "contract": r.get("contract", ""),
+               "cost_basis_usd": basis,
+               "pnl_usd": (value - basis) if basis > 0 else None,
+               "pnl_pct": ((value - basis) / basis * 100) if basis > 0 else None}
         chains.setdefault(r["chain"], []).append(row)
         total += row["value_usd"]
         if r["is_gas"]:
             gas[r["chain"]] = row["balance"]
-    return {"chains": chains, "total_usd": total, "gas": gas}
+    # wallet-level P&L: total value vs total cost basis of bot-acquired assets
+    total_basis = sum(r.get("cost_basis_usd") or 0.0 for rows in chains.values()
+                      for r in rows if not r.get("is_gas_row"))
+    return {"chains": chains, "total_usd": total, "gas": gas,
+            "total_cost_basis_usd": total_basis,
+            "total_pnl_usd": total - total_basis if total_basis > 0 else None}
 
 
 class EtherscanKeyPayload(BaseModel):
