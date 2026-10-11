@@ -154,6 +154,16 @@ class ConstraintValidator:
 
         a_type = action.get("type")
         asset = action.get("asset", "")
+        # normalize symbol-or-contract to the SYMBOL first, so percent
+        # amounts resolve against holdings whichever way the AI named it
+        if asset and asset not in known_assets and known_assets.get(asset) is None:
+            match = next((cand["asset"] for cand in known_assets.values()
+                          if (cand.get("contract") or "").lower() == asset.lower()), None)
+            if match:
+                orig = asset
+                asset = match
+                action["asset"] = asset
+                action["_contract"] = orig
         amount = self._resolve_amount(action, prices)
 
         if a_type not in ("buy", "sell", "swap"):
@@ -161,10 +171,29 @@ class ConstraintValidator:
 
         if a_type == "swap":
             dest = action.get("asset_out") or action.get("swap_to") or ""
+            # resolve both assets by symbol OR contract (the AI may use either)
+            resolved = []
             for a in (asset, dest):
-                r = self._validate_asset(a, known_assets)
-                if not r.ok:
-                    return r
+                if a in known_assets:
+                    resolved.append(a)
+                    continue
+                match = next((cand["asset"] for cand in known_assets.values()
+                              if (cand.get("contract") or "").lower() == a.lower()), None)
+                if match is None:
+                    r = self._validate_asset(a, known_assets)
+                    if not r.ok:
+                        return r
+                    resolved.append(a)
+                else:
+                    resolved.append(match)
+            action["asset"], action["_swap_dest"] = resolved[0], resolved[1]
+            if resolved[1] in known_assets and known_assets[resolved[1]].get("contract"):
+                action["_swap_dest_contract"] = known_assets[resolved[1]]["contract"]
+            if resolved[0] in known_assets and known_assets[resolved[0]].get("contract"):
+                action["_contract"] = known_assets[resolved[0]]["contract"]
+            # the swap SELLS the held asset: resolve the amount against holdings
+            if amount is None or amount <= 0:
+                return ValidationResult(False, "Missing or non-positive amount.")
             return ValidationResult(True, "")
 
         # resolve asset: the AI may reference by symbol OR contract address.

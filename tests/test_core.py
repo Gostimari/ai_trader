@@ -2677,3 +2677,53 @@ class TestAdaptiveReserve:
         from memicoin_core.ai_engine import BASE_INSTRUCTIONS
         assert "GAS MANAGEMENT" in BASE_INSTRUCTIONS
         assert "small slice" in BASE_INSTRUCTIONS.replace("\n", " ")
+
+
+class TestSwapByContractAndGasFunding:
+    def test_swap_by_contract_validates(self, db, monkeypatch):
+        # the user's rejected swap: TYBG(contract) -> USDC(contract)
+        db.demo_mode_percent = True
+        TYBG_C = "0x0d97F261b1e88845184f678e2d1e7a98D9FD38dE"
+        USDC_C = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        db.demo_set("base", "TYBG", 1000.0, contract=TYBG_C, cost_basis_usd=2.5)
+        db.demo_set("base", "ETH", 0.019, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        prices = {"TYBG": 9.273e-06, "USDC": 1.0}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: {
+                                "TYBG": {"asset": "TYBG", "chain": "base", "contract": TYBG_C},
+                                "USDC": {"asset": "USDC", "chain": "base", "contract": USDC_C}})
+        action = {"type": "swap", "asset": TYBG_C, "asset_out": USDC_C,
+                  "amount_or_percent": "50%", "reason": "rebalance"}
+        r = engine.validator.validate_action(
+            action, prices, engine.market.get_asset_map())
+        assert r.ok, r.reason  # contract-keyed swap now resolves
+        assert action["asset"] == "TYBG"  # normalized for execution
+        db.demo_mode_percent = False
+        db.demo_clear()
+
+    def test_demo_buy_funded_by_eth_prices_gas_via_weth(self, db, monkeypatch):
+        # the user's failed PEPE/MOG buys: ethereum holds only ETH (gas)
+        PEPE_C = "0x698250814c91d14f950d89e3ecea8f0e1eb8d821"
+        db.demo_set("ethereum", "ETH", 0.0197, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo",
+                        max_position_pct=25.0)
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        prices = {"PEPE": 2.68e-05, "USDC": 1.0}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda contracts: {"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": 2500.0})
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: {"PEPE": {"asset": "PEPE", "chain": "ethereum",
+                                                           "contract": PEPE_C}})
+        err = engine._execute_demo("cx", {"type": "buy", "asset": PEPE_C,
+                                          "amount": 100000, "reason": "r",
+                                          "_contract": PEPE_C}, "PEPE", 100000.0)
+        # $2.68 buy funded by investable ETH (~$30 after 1-swap reserve)
+        assert err is None, err
+        eth_after = db.demo_get("ethereum", "ETH")["balance"]
+        assert eth_after == pytest.approx(0.0197 - 100000 * 2.68e-05 / 2500.0 - 0.0075, rel=1e-3)
+        assert db.demo_get("ethereum", "PEPE", PEPE_C)["balance"] == pytest.approx(100000.0)
+        db.demo_clear()

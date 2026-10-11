@@ -712,6 +712,17 @@ class DecisionEngine:
         gas_price = prices.get(gas_symbol, 0.0)
         if gas_price <= 0 and gas_symbol == "USDC":
             gas_price = 1.0
+        if gas_price <= 0:
+            # gas token not in the symbol map (e.g. plain ETH): price it via
+            # its wrapped contract, the same as every other view
+            from .demowallet import NATIVE_WRAPPED
+            w = NATIVE_WRAPPED.get(chain)
+            if w:
+                try:
+                    addr_p = self.market.get_prices_for_addresses([w])
+                    gas_price = addr_p.get(w.lower(), 0.0)
+                except Exception:
+                    pass
         investable_gas_qty = demo.investable_gas(chain)
         symbol = (info or {}).get("asset", asset)  # human symbol when known
         if action["type"] == "buy":
