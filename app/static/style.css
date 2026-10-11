@@ -53,3 +53,6 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 .seed-word.filled { border-color: var(--accent); }
 .seed-word input::placeholder { color: var(--muted); font-size: .7rem; }
 #seed-input-area input, #key-input-area input { font-family: monospace; }
+
+.import-mode-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 7px 14px; border-radius: 8px; cursor: pointer; }
+.import-mode-btn.active { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }

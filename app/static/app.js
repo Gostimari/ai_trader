@@ -12,8 +12,9 @@ async function api(path, body, method) {
 }
 
 function tabs() {
-  document.querySelectorAll(".tab").forEach((t) =>
+  document.querySelectorAll("nav .tab").forEach((t) =>
     t.addEventListener("click", () => {
+      if (!t.dataset.tab) return;
       document.querySelectorAll(".tab, .panel").forEach((x) => x.classList.remove("active"));
       t.classList.add("active");
       $("#" + t.dataset.tab).classList.add("active");
