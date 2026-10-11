@@ -13,6 +13,9 @@
   <div id="status-badges"></div>
 </header>
 
+<div id="setup-hint" class="setup-hint hidden"></div>
+<div id="gas-warning" class="gas-warning hidden"></div>
+<div id="cycle-banner" class="banner hidden"></div>
 <div class="disclaimer">
   ⚠️ Meme coins are extremely volatile. This software does not guarantee profit.
   Paper-trading mode simulates trades against real market data with virtual funds.
@@ -21,9 +24,8 @@
 <nav>
   <button data-tab="portfolio" class="tab active">Portfolio</button>
   <button data-tab="decisions" class="tab">Decision Feed</button>
-  <button data-tab="market" class="tab">Market</button>
   <button data-tab="settings" class="tab">Goals &amp; Constraints</button>
-  <button data-tab="news" class="tab">News</button>
+  <button data-tab="wallet" class="tab">My Wallet</button>
 </nav>
 
 <main>
@@ -37,8 +39,7 @@
       <button id="btn-cycle">▶ Run decision cycle now</button>
       <button id="btn-pause">⏸ Pause/Resume</button>
       <button id="btn-emergency" class="danger">🛑 Emergency stop</button>
-      <button id="btn-stable" class="danger">💵 Convert all to cash</button>
-      <button id="btn-reset">↺ Reset paper portfolio</button>
+      <button id="btn-stable" class="danger">💵 Convert all to USDC (per chain)</button>
       <button id="btn-resume" class="hidden">Re-enable trading</button>
     </div>
     <div id="cycle-result"></div>
@@ -52,49 +53,172 @@
     </table>
   </section>
 
-  <section id="market" class="panel">
-    <table id="market-table">
-      <thead><tr><th>Asset</th><th>Chain</th><th>Price $</th><th>24h %</th><th>7d %</th><th>Vol 24h $</th><th>Mkt Cap $</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
-
   <section id="settings" class="panel">
+
+    <h3>1 · Trading Mode</h3>
+    <div class="mode-switch">
+      <button id="btn-mode-demo" class="mode-btn active">🧪 Wallet Demo</button>
+      <button id="btn-mode-real" class="mode-btn danger">💰 Real Money</button>
+    </div>
+    <p class="hint" id="mode-hint">Demo mode: the AI trades your demo wallet with real prices, real gas costs, all constraints — simulated settlement.</p>
+    <div id="real-mode-warning" class="warning hidden">
+      ⚠️ REAL MONEY MODE: the AI will trade the imported wallet's actual funds on DEXs.
+      Your constraints (max loss, position limits, allowed chains) still apply and are enforced in code,
+      but real funds are at risk. DEX swaps are irreversible.
+    </div>
+
+    <h3 style="margin-top:28px">1b · AI Provider Key</h3>
+    <p class="hint">The app needs a Mistral API key to make decisions. Paste it here — it is
+      stored encrypted on your machine, never displayed again. (Alternative: put
+      <code>MISTRAL_API_KEY</code> in the <code>.env</code> file.) Get a key at console.mistral.ai.</p>
+    <form id="mistral-key-form">
+      <label>Mistral API key
+        <input type="password" id="mistral-key" autocomplete="off" placeholder="paste key and save"></label>
+      <div id="mistral-key-status" class="hint"></div>
+      <button type="submit">Save key (encrypted)</button>
+    </form>
+
+    <h3 style="margin-top:28px">2 · Constraints for the AI</h3>
+    <p class="hint">Hard limits enforced in code on every action — the AI cannot break these.</p>
     <form id="settings-form">
-      <label>Profit target % (optional, stop when portfolio is up this much)
-        <input type="number" id="profit_target_pct" step="0.1" min="0" placeholder="e.g. 50"></label>
-      <label>Max loss % (required, hard stop)
+      <label>Max loss % (hard stop: trading halts when the portfolio is down this much)
         <input type="number" id="max_loss_pct" step="0.1" min="0" max="100" required value="20"></label>
-      <label>Risk profile
-        <select id="risk_profile">
-          <option value="safe">Safe</option>
-          <option value="balanced" selected>Balanced</option>
-          <option value="aggressive">Aggressive</option>
-        </select></label>
+      <label>Per-position stop-loss % (a position down this much is auto-sold to cash/USDC at the next cycle; 0 = off)
+        <input type="number" id="per_position_stop_pct" step="0.1" min="0" value="20"></label>
+      <label>Profit target % (optional: stop when up this much)
+        <input type="number" id="profit_target_pct" step="0.1" min="0" placeholder="e.g. 50"></label>
       <label>Max position size (% of portfolio in one asset)
         <input type="number" id="max_position_pct" step="0.1" min="0.1" max="100" value="25"></label>
-      <label>Allowed blockchains (comma-separated, e.g. solana, ethereum, base)
-        <input type="text" id="allowed_chains" value="solana, ethereum, binance-smart-chain, base, polygon"></label>
-      <label>Decision time (UTC)
+      <label>Risk appetite (influences how the AI writes its plan)
+        <select id="risk_profile">
+          <option value="safe">Safe — prioritize capital preservation</option>
+          <option value="balanced" selected>Balanced</option>
+          <option value="aggressive">Aggressive — chase upside</option>
+        </select></label>
+      <label>Allowed blockchains (comma-separated)
+        <input type="text" id="allowed_chains" value="solana, ethereum, binance-smart-chain, base, polygon, arc"></label>
+      <label>Daily decision time (UTC)
         <input type="time" id="decision_time_utc" value="00:00"></label>
       <label>Custom prompt — instructions the AI reads before every decision
         <textarea id="custom_prompt" rows="5" placeholder="e.g. Avoid tokens less than 30 days old. Prefer high-liquidity pairs. Never hold more than 3 positions at once."></textarea></label>
-      <label>Autonomy mode
+      <label>Autonomy
         <select id="autonomy_mode">
-          <option value="constrained" selected>Constrained (recommended)</option>
-          <option value="full_control">Full control (no restrictions)</option>
+          <option value="constrained" selected>Constrained — respect all limits above</option>
+          <option value="full_control">Full control — ignore limits, maximize profit</option>
         </select></label>
       <div id="full-control-warning" class="warning hidden">
-        ⚠️ Full control removes ALL user constraints. The AI will decide everything with
-        profit maximization as its only objective. Only technical limits apply. Are you sure?
+        ⚠️ Full control removes ALL constraints except technical limits. Only technical limits apply. Are you sure?
       </div>
-      <button type="submit">Save settings</button>
+      <button type="submit">Save constraints</button>
+    </form>
+
+    <h3 style="margin-top:28px">3 · Wallet (real money mode)</h3>
+    <p class="hint">Import your hot wallet once. The key is stored encrypted and used only for signing.
+      One <b>EVM key works on all EVM chains</b> (Ethereum, Base, Polygon, BSC, Arc) — same address everywhere.
+      Solana needs its own key (different cryptography).</p>
+    <form id="wallet-form">
+      <label>Wallet type
+        <select id="wallet-chain">
+          <option value="evm">EVM multi-chain (Ethereum, Base, Polygon, BSC, Arc) — one key for all</option>
+          <option value="solana">Solana (separate key)</option>
+        </select></label>
+      <div class="tabs">
+        <button type="button" id="btn-import-seed" class="import-mode-btn active">Seed phrase (12/24 words)</button>
+        <button type="button" id="btn-import-key" class="import-mode-btn">Raw private key</button>
+      </div>
+      <div id="seed-input-area">
+        <div id="seed-words" class="seed-words"></div>
+        <div class="hint" id="seed-hint">Type your seed phrase — words are boxed as you type.</div>
+      </div>
+      <div id="key-input-area" class="hidden">
+        <label>Private key (EVM: hex with 0x · Solana: base58 or JSON byte array)
+          <input type="password" id="wallet-key" autocomplete="off"></label>
+        <div class="hint">Note: seed phrases can't be used for Solana (non-standard derivation) — export its raw key from your wallet.</div>
+      </div>
+      <div id="wallet-status" class="hint"></div>
+      <button type="submit">Import wallet</button>
+      <button type="button" id="btn-wallet-delete" class="danger">Remove wallet from app</button>
+    </form>
+
+    <h3 style="margin-top:28px">3b · Auto-discovery of your tokens</h3>
+    <p class="hint">Automatically find every token your linked wallet holds.
+      <b>Solana: fully automatic</b> (tokens are enumerable on-chain — nothing to configure).
+      <b>EVM chains (Ethereum, Base, Polygon, BSC, Arc):</b> paste a free
+      <a href="https://etherscan.io/apis" target="_blank" rel="noopener">Etherscan API key</a>
+      (one key covers all Etherscan-family chains via their V2 API) and the app lists
+      every contract your wallet ever transacted, then reads the real balances on-chain.
+      Without a key, only Watchlist tokens are shown.</p>
+    <form id="etherscan-key-form">
+      <label>Etherscan API key (optional, free tier is enough)
+        <input type="password" id="etherscan-key" autocomplete="off" placeholder="paste key and save"></label>
+      <div id="etherscan-key-status" class="hint"></div>
+      <button type="submit">Save key (encrypted)</button>
+    </form>
+
+    <h3 style="margin-top:28px">3c · Demo Wallet — test with realistic fake funds</h3>
+    <p class="hint">Build a fake wallet the bot trades like a real one: real DexScreener prices,
+      real gas costs deducted per transaction, gas reserve enforced — only the blockchain
+      transaction is simulated. Add gas tokens (ETH on base, USDC on arc, ...) and any tokens
+      with amounts you choose, then switch Trading Mode to Real money \u2192 Demo.</p>
+    <div class="controls">
+      <button id="btn-go-demo" class="danger">\ud83d\udcca Use Demo Wallet mode</button>
+    </div>
+    <form id="demo-add-form">
+      <label>Blockchain
+        <select id="demo-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="base">Base</option>
+          <option value="polygon">Polygon</option>
+          <option value="binance-smart-chain">BSC</option>
+          <option value="arc">Arc</option>
+          <option value="solana">Solana</option>
+        </select></label>
+      <label>Token symbol (e.g. ETH for gas, USDC, BRETT)
+        <input type="text" id="demo-asset" placeholder="USDC"></label>
+      <label>Amount
+        <select id="demo-amount-unit" style="width: 130px;">
+          <option value="token">Token amount (e.g. 0.02 ETH)</option>
+          <option value="usd">USD value (e.g. $50 of ETH)</option>
+        </select>
+        <input type="number" id="demo-balance" step="any" min="0" placeholder="0.02 or 50"></label>
+      <div class="hint" id="demo-amount-hint"></div>
+      <label>Contract address (optional; needed for non-gas tokens the AI should trade)
+        <input type="text" id="demo-contract" placeholder="0x... (leave empty for gas/USDC)"></label>
+      <label style="flex-direction: row; align-items: center; gap: 8px;">
+        <input type="checkbox" id="demo-is-gas" style="width: auto;"> This is the gas token (ETH/POL/BNB/SOL/USDC-on-arc)
+      </label>
+      <button type="submit">Add / update</button>
+    </form>
+    <div id="demo-wallet-table"></div>
+    <div class="controls">
+      <button id="btn-demo-clear" class="danger">Clear demo wallet</button>
+    </div>
+
+    <h3 style="margin-top:28px">4 · Watchlist — extra assets for the AI</h3>
+    <p class="hint">Beyond the built-in meme coins, the AI will analyze and price any asset you add here.
+      Data comes from DexScreener (all DEX pairs incl. the Arc ecosystem). Enter token
+      <b>contract addresses</b> (e.g. <code>0x171a4217b86a807a64eb94757db6849fb4bdbaa0</code> = cirBTC on Arc)
+      or names/symbols. Comma-separated, up to 30.</p>
+    <form id="watchlist-form">
+      <label>Extra assets
+        <input type="text" id="watchlist-ids" placeholder="0x171a4217b86a807a64eb94757db6849fb4bdbaa0, USYC, EURC"></label>
+      <div id="watchlist-status" class="hint"></div>
+      <button type="submit">Save watchlist</button>
     </form>
   </section>
 
-  <section id="news" class="panel">
-    <ul id="news-list"></ul>
+  <section id="wallet" class="panel">
+    <div class="cards" id="wallet-cards"></div>
+    <p class="hint" id="wallet-hint"></p>
+    <div id="gas-health"></div>
+    <p class="hint">Tokens shown = native coins + tokens from your Watchlist. Hold a token
+      that's missing? Add its <b>contract address</b> in Settings \u00b7 4 Watchlist and it
+      appears here (and gets priced for the AI). With an Etherscan key (Settings \u00b7 3b),
+      discovery is fully automatic. Solana tokens are always discovered automatically.
+      TON tokens are not supported.</p>
+    <div id="wallet-balances"></div>
   </section>
+
 </main>
 
 <script src="/static/app.js"></script>
