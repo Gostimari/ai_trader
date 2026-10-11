@@ -250,6 +250,11 @@ def wallet_balances():
     # pre-resolve unpriced symbols once (bounded searches, memoized)
     _symbol_fallback: dict = {}
 
+    # stablecoins never go through symbol-search: searching "USDC" returns
+    # decoy tokens with fake liquidity (verified live: a $0.0001 "USDC" on
+    # Base with $100k liquidity). The peg floor is the honest price floor.
+    STABLES = {"USDC", "USDT", "DAI", "FRAX", "USDE", "SUSDS"}
+
     def _price_unpriced(rows_by_chain: dict) -> None:
         for chain, rows in rows_by_chain.items():
             for r in rows:
@@ -258,6 +263,8 @@ def wallet_balances():
                     continue
                 if r.get("value_usd", 0) > 0 or r.get("kind") == "native":
                     continue
+                if (r.get("symbol") or "").upper() in STABLES:
+                    continue  # peg floor handles stables; search invites decoys
                 _symbol_fallback[key] = _resolve_symbol_price(r["symbol"], chain)
 
     evm = raw.get("evm")

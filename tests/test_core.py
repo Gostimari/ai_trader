@@ -1461,3 +1461,32 @@ class TestSymbolFallbackPricing:
         row = d["chains"]["arc"][0]
         assert row["symbol"] == "ARGUS"
         assert row["value_usd"] == pytest.approx(1.15)  # 100 * $0.0115, arc pair only
+
+
+class TestStablecoinDecoyProtection:
+    def test_stables_skip_symbol_search(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        from fastapi.testclient import TestClient
+        searches = []
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses", lambda contracts: {})
+        def fake_search(q, **kw):
+            searches.append(q)
+            return []  # would be decoys; must not even be called for stables
+        monkeypatch.setattr(srv.market, "_ds_search", fake_search)
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                           lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0,
+                         "tokens": [{"symbol": "USDC", "contract": "0xunpriced",
+                                     "balance": 10.0}]}}
+            }, "solana": None})
+        c = TestClient(srv.app)
+        d = c.get("/api/wallet/balances").json()
+        row = d["chains"]["base"][0]
+        assert row["value_usd"] == pytest.approx(10.0)  # peg floor, not a decoy
+        assert "USDC" not in searches  # no symbol-search for stables
