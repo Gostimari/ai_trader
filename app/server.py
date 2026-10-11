@@ -100,7 +100,19 @@ def wallet_balances():
     if not (secrets.has("onchain_private_key") or secrets.has("onchain_solana_private_key")):
         return {"configured": False, "chains": {}, "total_usd": 0.0}
     from memicoin_core.onchain import read_wallet_balances
-    raw = read_wallet_balances(secrets)
+    # map watchlist contract addresses -> chain via the market data we
+    # already have (DexScreener returns chainId + contract per token)
+    extra_contracts: dict[str, list[dict]] = {}
+    try:
+        for a in market.get_asset_map().values():
+            contract = a.get("contract") or ""
+            chain = a.get("chain") or ""
+            if contract.startswith("0x") and len(contract) == 42 and chain:
+                extra_contracts.setdefault(chain, []).append(
+                    {"address": contract, "symbol": a["asset"]})
+    except MarketDataError:
+        pass
+    raw = read_wallet_balances(secrets, extra_contracts=extra_contracts)
     try:
         prices = market.get_prices()
         asset_map = market.get_asset_map()

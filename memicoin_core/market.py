@@ -33,7 +33,11 @@ CHAIN_HINTS = {
 # Default watchlist: CoinGecko ids and/or contract addresses.
 # cirBTC on Arc (0x171a...) and on Ethereum (0x72df...) are both indexed by
 # DexScreener; ids are kept for the CoinGecko fallback.
-DEFAULT_EXTRA_IDS = ["circle-wrapped-btc", "0x171a4217b86a807a64eb94757db6849fb4bdbaa0"]
+DEFAULT_EXTRA_IDS = [
+    "circle-wrapped-btc",
+    "0x171a4217b86a807a64eb94757db6849fb4bdbaa0",  # cirBTC on Arc (docs)
+    "0x532f27101965dd16442E59d40670FaF5eBB142E4",  # BRETT on Base (DexScreener-verified)
+]
 
 # Symbols queried on DexScreener (search endpoint) per chain.
 DEX_SYMBOLS_BY_CHAIN = {

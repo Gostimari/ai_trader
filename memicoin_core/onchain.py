@@ -372,10 +372,15 @@ def stablecoin_target(chain: str) -> tuple[str, str]:
     return EVM_CHAINS[chain]["weth"], "wrapped native (no verified USDC on this chain)"
 
 
-def read_wallet_balances(secrets: SecretStore, chains: list[str] | None = None) -> dict:
+def read_wallet_balances(secrets: SecretStore, chains: list[str] | None = None,
+                        extra_contracts: dict | None = None) -> dict:
     """Read native + known token balances for the imported wallet.
 
-    Returns {'evm': {'address': .., 'chains': {chain: {'native': x, 'tokens': [... KW..]}}},
+    extra_contracts: {chain: [{"address": "0x..", "symbol": "SYM"}, ...]}
+    from the user's watchlist — arbitrary tokens the user holds are read
+    directly on-chain (balanceOf), so no paid indexer is needed.
+
+    Returns {'evm': {'address': .., 'chains': {chain: {'native': x, 'tokens': [...]}}},
              'solana': {...}, 'error': optional}
     Native symbol is per chain (ETH/MATIC/BNB/USDC-on-Arc/SOL).
     """
@@ -402,6 +407,21 @@ def read_wallet_balances(secrets: SecretStore, chains: list[str] | None = None) 
                         bal = w.erc20_balance(addr)
                         if bal and bal > 0:
                             entry["tokens"].append({"symbol": sym, "contract": addr,
+                                                    "balance": bal})
+                    except Exception:
+                        continue
+                # user watchlist contracts: discovered tokens the user wants
+                # tracked (e.g. BRETT on Base, ARCAT/ARGUS on Arc). Balance is
+                # read directly on-chain; zero balances are simply omitted.
+                for extra in (extra_contracts or {}).get(chain, []):
+                    if any(t["contract"].lower() == extra["address"].lower()
+                           for t in entry["tokens"]):
+                        continue
+                    try:
+                        bal = w.erc20_balance(extra["address"])
+                        if bal and bal > 0:
+                            entry["tokens"].append({"symbol": extra.get("symbol", "?"),
+                                                    "contract": extra["address"],
                                                     "balance": bal})
                     except Exception:
                         continue

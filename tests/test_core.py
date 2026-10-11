@@ -733,7 +733,8 @@ class TestUserTestGaps:
         monkeypatch.setattr(srv, "db", db)
         monkeypatch.setattr(srv.secrets, "has",
                             lambda k: k == "onchain_private_key")
-        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None: {
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                           lambda s, chains=None, extra_contracts=None: {
             "evm": {"address": "0xabc", "chains": {
                 "arc": {"native_symbol": "USDC", "native": 12.0,
                         "tokens": [{"symbol": "CIRBTC", "contract": "0x171", "balance": 2.0}]}
@@ -760,7 +761,8 @@ class TestUserTestGaps:
         c0 = load_constraints(db)
         c0.paper_trading = False
         db.set_setting("constraints", c0.to_json())
-        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None: {
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                           lambda s, chains=None, extra_contracts=None: {
             "evm": {"address": "0xabc", "chains": {
                 "arc": {"native_symbol": "USDC", "native": 5.0,
                         "tokens": [{"symbol": "CIRBTC", "contract": "0x171", "balance": 1.0}]}
@@ -1183,3 +1185,66 @@ class TestSeedPhraseImport:
         r = c.post("/api/wallet/import", json={"chain": "evm", "seed_phrase": seed})
         assert seed not in r.text
         assert "test test" not in r.text
+
+
+class TestWatchlistTokenBalances:
+    def test_extra_contracts_read_onchain(self, tmp_path, monkeypatch):
+        import memicoin_core.onchain as oc
+        class _FakeW:
+            def __init__(self, secrets, chain): self.chain = chain
+            def native_balance(self): return 0.0
+            def erc20_balance(self, addr):
+                # wallet holds 1000 of the watchlist token, nothing else
+                if addr.lower() == "0x532f27101965dd16442e59d40670faf5ebb142e4":
+                    return 1000.0
+                return 0.0
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        class _Store:
+            def has(self, k): return k == "onchain_private_key"
+            def get(self, k): return "0x" + "1" * 64
+        balances = oc.read_wallet_balances(
+            _Store(),
+            extra_contracts={"base": [{"address": "0x532f27101965dd16442E59d40670FaF5eBB142E4",
+                                      "symbol": "BRETT"}]})
+        base_tokens = balances["evm"]["chains"]["base"]["tokens"]
+        assert len(base_tokens) == 1
+        assert base_tokens[0]["symbol"] == "BRETT"
+        assert base_tokens[0]["balance"] == 1000.0
+
+    def test_zero_balance_omitted(self, tmp_path, monkeypatch):
+        import memicoin_core.onchain as oc
+        class _FakeW:
+            def __init__(self, secrets, chain): pass
+            def native_balance(self): return 0.0
+            def erc20_balance(self, addr): return 0.0
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        class _Store:
+            def has(self, k): return k == "onchain_private_key"
+            def get(self, k): return "0x" + "1" * 64
+        balances = oc.read_wallet_balances(
+            _Store(), extra_contracts={"base": [{"address": "0x" + "a" * 40,
+                                                 "symbol": "X"}]})
+        assert balances["evm"]["chains"]["base"]["tokens"] == []
+
+    def test_server_passes_watchlist_contracts(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        import memicoin_core.onchain as oc
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        captured = {}
+        def fake_read(secrets, chains=None, extra_contracts=None):
+            captured["extra"] = extra_contracts
+            return {"evm": {"address": "0xa", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0,
+                         "tokens": [{"symbol": "BRETT", "contract": "0x53", "balance": 5}]}
+            }}, "solana": None}
+        monkeypatch.setattr(oc, "read_wallet_balances", fake_read)
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {
+            "BRETT": {"asset": "BRETT", "chain": "base",
+                      "contract": "0x532f27101965dd16442E59d40670FaF5eBB142E4"}})
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {"BRETT": 0.006})
+        c = TestClient(srv.app)
+        d = c.get("/api/wallet/balances").json()
+        assert d["chains"]["base"][0]["symbol"] == "BRETT"
+        assert captured["extra"]["base"][0]["symbol"] == "BRETT"
