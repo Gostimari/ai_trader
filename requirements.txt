@@ -10,3 +10,4 @@ ccxt>=4.0
 web3>=6.0
 solana>=0.34
 solders>=0.18
+eth-account>=0.13

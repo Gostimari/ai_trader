@@ -123,8 +123,19 @@
           <option value="evm">EVM multi-chain (Ethereum, Base, Polygon, BSC, Arc) — one key for all</option>
           <option value="solana">Solana (separate key)</option>
         </select></label>
-      <label>Private key (EVM: hex with 0x · Solana: base58 or JSON byte array)
-        <input type="password" id="wallet-key" autocomplete="off"></label>
+      <div class="tabs">
+        <button type="button" id="btn-import-seed" class="tab active">Seed phrase (12/24 words)</button>
+        <button type="button" id="btn-import-key" class="tab">Raw private key</button>
+      </div>
+      <div id="seed-input-area">
+        <div id="seed-words" class="seed-words"></div>
+        <div class="hint" id="seed-hint">Type your seed phrase — words are boxed as you type.</div>
+      </div>
+      <div id="key-input-area" class="hidden">
+        <label>Private key (EVM: hex with 0x · Solana: base58 or JSON byte array)
+          <input type="password" id="wallet-key" autocomplete="off"></label>
+        <div class="hint">Note: seed phrases can't be used for Solana (non-standard derivation) — export its raw key from your wallet.</div>
+      </div>
       <div id="wallet-status" class="hint"></div>
       <button type="submit">Import wallet</button>
       <button type="button" id="btn-wallet-delete" class="danger">Remove wallet from app</button>

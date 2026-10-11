@@ -201,7 +201,8 @@ def go_paper():
 # ---------- on-chain wallet (Mode B) ----------
 class WalletImport(BaseModel):
     chain: str
-    private_key: str
+    private_key: str = ""
+    seed_phrase: str = ""
 
 
 @app.post("/api/wallet/import")
@@ -211,9 +212,21 @@ def wallet_import(w: WalletImport):
     a Solana keypair. Keys are stored encrypted and NEVER returned; only the
     derived public address is echoed once for user verification."""
     chain = w.chain.strip().lower()
+    if w.seed_phrase and chain == "solana":
+        raise HTTPException(400, "Seed phrases cannot be used for Solana in this app: Solana wallets use non-standard derivation. Export the raw key from your wallet app and import that.")
     try:
         if chain in ("evm", "ethereum", "base", "polygon", "binance-smart-chain", "arc"):
             from web3 import Web3
+            if w.seed_phrase:
+                words = w.seed_phrase.strip().lower().split()
+                if len(words) not in (12, 15, 18, 21, 24):
+                    raise HTTPException(400, f"Seed phrase must have 12/15/18/21/24 words — got {len(words)}")
+                from eth_account import Account
+                Account.enable_unaudited_hdwallet_features()
+                acct = Account.from_mnemonic(" ".join(words))  # standard path m/44'/60'/0'/0/0
+                secrets.set("onchain_private_key", acct.key.hex())
+                return {"ok": True, "chain": "evm", "address": acct.address,
+                        "derived_from": "seed (first account)"}
             key = w.private_key if w.private_key.startswith("0x") else "0x" + w.private_key
             acct = Web3().eth.account.from_key(key)
             secrets.set("onchain_private_key", key)

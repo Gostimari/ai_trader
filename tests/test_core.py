@@ -1126,3 +1126,60 @@ class TestPairPickerQuality:
         deep = self._pair("ethereum", 10**9, 10)      # fake deep book
         active = self._pair("ethereum", 10**4, 10**6)  # real activity
         assert MarketDataModule._best_pair([deep, active])["liquidity"]["usd"] == 10**4
+
+
+class TestSeedPhraseImport:
+    def test_seed_phrase_derives_known_address(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/wallet/import", json={
+            "chain": "evm",
+            "seed_phrase": "test test test test test test test test test test test junk"})
+        assert r.status_code == 200
+        assert r.json()["address"] == "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        assert "seed" in r.json()["derived_from"]
+        st = c.get("/api/wallet/status").json()
+        assert st["evm_address"] == "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+
+    def test_bad_word_count_rejected(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/wallet/import", json={
+            "chain": "evm", "seed_phrase": "one two three four five six"})
+        assert r.status_code == 400
+        assert "12/15/18/21/24" in r.json()["detail"]
+
+    def test_invalid_seed_phrase_rejected(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/wallet/import", json={
+            "chain": "evm",
+            "seed_phrase": " ".join(["notbip39word"] * 12)})
+        assert r.status_code == 400
+
+    def test_seed_for_solana_rejected_honestly(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/wallet/import", json={
+            "chain": "solana",
+            "seed_phrase": "test test test test test test test test test test test junk"})
+        assert r.status_code == 400
+        assert "Solana" in r.json()["detail"]
+
+    def test_seed_never_echoed(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        seed = "test test test test test test test test test test test junk"
+        r = c.post("/api/wallet/import", json={"chain": "evm", "seed_phrase": seed})
+        assert seed not in r.text
+        assert "test test" not in r.text

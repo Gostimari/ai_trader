@@ -46,3 +46,10 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 .banner.ok { background: #14351f; color: #7ee2a8; }
 .banner.err { background: #4a1f24; color: #ff9aa5; }
 .setup-hint { padding: 12px 22px; background: #3a2c14; color: #f0c674; font-size: .85rem; border-bottom: 1px solid var(--border); }
+
+.seed-words { display: flex; flex-wrap: wrap; gap: 6px; }
+.seed-word { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: .85rem; }
+.seed-word input { width: 90px; border: 0; background: transparent; padding: 2px; }
+.seed-word.filled { border-color: var(--accent); }
+.seed-word input::placeholder { color: var(--muted); font-size: .7rem; }
+#seed-input-area input, #key-input-area input { font-family: monospace; }

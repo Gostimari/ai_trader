@@ -153,6 +153,79 @@ function controls() {
   });
 }
 
+
+function buildSeedInputs() {
+  const wrap = $("#seed-words");
+  if (!wrap || wrap.children.length) return;
+  const fields = [];
+  const make = (idx) => {
+    const chip = document.createElement("span");
+    chip.className = "seed-word";
+    const num = document.createElement("span");
+    num.textContent = idx + 1;
+    num.style.color = "var(--muted)";
+    num.style.fontSize = ".7rem";
+    num.style.marginRight = "4px";
+    const inp = document.createElement("input");
+    inp.type = "password";
+    inp.autocomplete = "off";
+    inp.placeholder = "word";
+    inp.addEventListener("input", () => {
+      chip.classList.toggle("filled", inp.value.trim().length > 0);
+      const { n, ok } = seedCount();
+      updateSeedHint(n, ok);
+    });
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === " " || e.key === "Enter") {
+        e.preventDefault();
+        const next = fields[idx + 1];
+        if (next) next.focus();
+      } else if (e.key === "Backspace" && !inp.value && idx > 0) {
+        fields[idx - 1].focus();
+      }
+    });
+    chip.appendChild(num);
+    chip.appendChild(inp);
+    fields.push(inp);
+    return chip;
+  };
+  for (let i = 0; i < 24; i++) wrap.appendChild(make(i));
+}
+
+function seedPhrase() {
+  return [...document.querySelectorAll("#seed-words input")]
+    .map((i) => i.value.trim().toLowerCase()).filter(Boolean).join(" ");
+}
+
+function seedCount() {
+  const n = seedPhrase() ? seedPhrase().split(" ").length : 0;
+  return { n, ok: [12, 15, 18, 21, 24].includes(n) };
+}
+
+function updateSeedHint(n, ok) {
+  const el = $("#seed-hint");
+  if (!el) return;
+  el.textContent = n === 0
+    ? "Type your seed phrase \u2014 space or Enter jumps to the next word."
+    : ok ? `${n} words \u2014 ready.`
+    : `${n} word(s) \u2014 seed phrases are 12/15/18/21/24 words.`;
+  el.style.color = ok ? "var(--green)" : "var(--muted)";
+}
+
+function importModeControls() {
+  $("#btn-import-seed").addEventListener("click", () => {
+    $("#btn-import-seed").classList.add("active");
+    $("#btn-import-key").classList.remove("active");
+    $("#seed-input-area").classList.remove("hidden");
+    $("#key-input-area").classList.add("hidden");
+  });
+  $("#btn-import-key").addEventListener("click", () => {
+    $("#btn-import-key").classList.add("active");
+    $("#btn-import-seed").classList.remove("active");
+    $("#key-input-area").classList.remove("hidden");
+    $("#seed-input-area").classList.add("hidden");
+  });
+}
 async function loadWalletStatus() {
   try {
     const s = await api("/api/wallet/status");
@@ -174,13 +247,25 @@ function walletControls() {
   $("#wallet-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const type = $("#wallet-chain").value;
-    const key = $("#wallet-key").value.trim();
-    if (!key) return alert("Paste the wallet private key.");
-    if (!confirm("Import this wallet for AUTONOMOUS trading?\n\nThe key is stored encrypted and the AI will move these funds within your constraints. ONLY use a dedicated hot wallet with limited funds.")) return;
+    const usingSeed = !$("#seed-input-area").classList.contains("hidden");
+    const body = { chain: type, private_key: "", seed_phrase: "" };
+    if (usingSeed) {
+      const { n, ok } = seedCount();
+      if (!ok) return alert(`Seed phrase has ${n} word(s) \u2014 must be 12/15/18/21/24.`);
+      if (!confirm("Import this wallet for AUTONOMOUS trading?\n\nThe seed is stored encrypted and the AI will move these funds within your constraints.\n\nOnly the FIRST account (m/44'/60'/0'/0/0) is derived \u2014 if your funds live on a different account, use the raw key import instead.\n\nONLY use a dedicated hot wallet with limited funds.")) return;
+      body.seed_phrase = seedPhrase();
+    } else {
+      const key = $("#wallet-key").value.trim();
+      if (!key) return alert("Paste the wallet private key.");
+      if (!confirm("Import this wallet for AUTONOMOUS trading?\n\nThe key is stored encrypted and the AI will move these funds within your constraints. ONLY use a dedicated hot wallet with limited funds.")) return;
+      body.private_key = key;
+    }
     try {
-      const r = await api("/api/wallet/import", { chain: type, private_key: key });
+      const r = await api("/api/wallet/import", body);
+      document.querySelectorAll("#seed-words input").forEach((i) => { i.value = ""; i.parentElement.classList.remove("filled"); });
       $("#wallet-key").value = "";
-      alert(`Wallet linked. Verify this address matches yours:\n${r.address}`);
+      updateSeedHint(0, false);
+      alert(`Wallet linked${r.derived_from ? " (" + r.derived_from + ")" : ""}.\nVerify this address matches yours:\n${r.address}`);
       loadWalletStatus(); refreshModeUI();
     } catch (e) { alert("Import failed: " + e.message); }
   });
