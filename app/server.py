@@ -243,6 +243,8 @@ def wallet_import(w: WalletImport):
         raise HTTPException(400, "Wallet type must be 'evm' or 'solana'.")
     except HTTPException:
         raise
+    except ModuleNotFoundError as e:
+        raise HTTPException(500, f"Server dependency missing: {e}. Run ./run.sh (or: ./.venv/bin/pip install -r requirements.txt) and restart.")
     except Exception as e:
         raise HTTPException(400, f"Invalid private key: {e}")
 

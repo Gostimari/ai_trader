@@ -7,13 +7,15 @@ cd "$(dirname "$0")"
 if [ ! -d .venv ]; then
   echo "First run: creating virtual environment..."
   python3 -m venv .venv
-  ./.venv/bin/pip install -q -r requirements.txt
-  echo "Done. Tip: copy .env.example to .env and add your MISTRAL_API_KEY."
 fi
 
+# Sync dependencies on every start: fast no-op when already installed,
+# and crucially picks up newly added requirements.txt entries.
+echo "Checking dependencies..."
+./.venv/bin/pip install -q -r requirements.txt
+
 if [ ! -f .env ]; then
-  echo "Note: no .env found. The AI cannot run decision cycles without MISTRAL_API_KEY."
-  echo "      cp .env.example .env  then edit it."
+  echo "Note: no .env found. You can set the Mistral key in the app (Settings) instead."
 fi
 
 PORT="${MEMICOIN_PORT:-8000}"
