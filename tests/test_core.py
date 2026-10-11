@@ -1091,3 +1091,38 @@ class TestPerPositionStopLoss:
                                                   "actions": [], "confidence": "low"}))
         engine.run_cycle()
         assert db.get_position("DOGE") is None
+
+
+class TestPairPickerQuality:
+    def _pair(self, chain, liq, vol, base="BONK", quote=None):
+        return {"chainId": chain, "liquidity": {"usd": liq}, "volume": {"h24": vol},
+                "quoteTokenSymbol": quote,
+                "baseToken": {"symbol": base, "name": base, "address": "0x1"},
+                "priceUsd": "1.0", "priceChange": {"h24": 1, "h7": 2}}
+
+    def test_fake_chain_rejected(self):
+        from memicoin_core.market import MarketDataModule
+        assert MarketDataModule._best_pair([self._pair("robinhood", 999, 999)]) is None
+
+    def test_zero_volume_imposter_rejected(self):
+        from memicoin_core.market import MarketDataModule
+        assert MarketDataModule._best_pair([self._pair("ethereum", 10**9, 0)]) is None
+
+    def test_symbol_mismatch_imposter_rejected(self):
+        from memicoin_core.market import MarketDataModule
+        # an imposter token named "SI" showing up in a WIF search
+        assert MarketDataModule._best_pair(
+            [self._pair("solana", 5470, 110410, base="SI")], symbol="WIF") is None
+
+    def test_prefers_allowed_chain_over_higher_volume(self):
+        from memicoin_core.market import MarketDataModule
+        eth = self._pair("ethereum", 10**6, 500)
+        sol = self._pair("solana", 10**5, 400)
+        best = MarketDataModule._best_pair([eth, sol], wanted_chains={"solana"})
+        assert best["chainId"] == "solana"
+
+    def test_ranks_by_volume_not_liquidity(self):
+        from memicoin_core.market import MarketDataModule
+        deep = self._pair("ethereum", 10**9, 10)      # fake deep book
+        active = self._pair("ethereum", 10**4, 10**6)  # real activity
+        assert MarketDataModule._best_pair([deep, active])["liquidity"]["usd"] == 10**4

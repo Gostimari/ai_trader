@@ -102,12 +102,15 @@ class MarketDataModule:
         assets: dict[str, dict] = {}
 
         # 1) symbol search for the known meme coins (one call per symbol)
+        allowed = {a.strip().lower() for a in
+                   (self.db.get_setting("constraints") or {}).get("allowed_chains", [])
+                   if a.strip()} or None
         for sym in symbols:
             try:
                 pairs = self._ds_search(sym)
             except requests.RequestException:
                 continue
-            best = self._best_pair(pairs)
+            best = self._best_pair(pairs, wanted_chains=allowed, symbol=sym)
             if best:
                 self._add_ds_asset(assets, best)
 
@@ -129,7 +132,7 @@ class MarketDataModule:
                     pairs = self._ds_search(entry)
                 except requests.RequestException:
                     continue
-                best = self._best_pair(pairs)
+                best = self._best_pair(pairs, wanted_chains=allowed, symbol=sym)
                 if best:
                     self._add_ds_asset(assets, best)
 
@@ -151,15 +154,50 @@ class MarketDataModule:
         data = resp.json()
         return data if isinstance(data, list) else []
 
-    @staticmethod
-    def _best_pair(pairs: list[dict]) -> dict | None:
-        best = None
-        for p in pairs:
-            quote = (p.get("quoteTokenSymbol") or "").upper()
-            if quote in ("USDC", "USDT", "WETH", "SOL", "WBTC", "ETH"):
-                best = p
-                break
-        return best or (pairs[0] if pairs else None)
+    # DexScreener uses pseudo-chain ids for its own venues ("robinhood") and
+    # search can return unverified/illiquid pairs. Only real chains count.
+    REAL_CHAINS = {"ethereum", "base", "solana", "bsc", "binance-smart-chain",
+                   "polygon", "arbitrum", "avalanche", "arc", "sui", "ton"}
+    GOOD_QUOTES = ("USDC", "USDT", "WETH", "SOL", "WBTC", "ETH", "WBNB")
+
+    @classmethod
+    def _best_pair(cls, pairs: list[dict], wanted_chains: set[str] | None = None,
+                   symbol: str | None = None) -> dict | None:
+        """Pick the deepest verified pair on a real chain. Prefers chains in
+        wanted_chains (the user's allowed list) when provided, else the
+        highest-liquidity real-chain pair. Requires non-trivial liquidity."""
+        def is_real(p):
+            return (p.get("chainId") or "") in cls.REAL_CHAINS
+
+        def liq(p):
+            return float((p.get("liquidity") or {}).get("usd") or 0.0)
+
+        def quote_ok(p):
+            # the search endpoint does not return quoteTokenSymbol at all,
+            # so only enforce the quote check when the field is present
+            q = p.get("quoteTokenSymbol")
+            return q is None or q.upper() in cls.GOOD_QUOTES
+
+        def vol24(p):
+            return float((p.get("volume") or {}).get("h24") or 0.0)
+
+        # require real trading activity: pairs with 0 volume are usually
+        # imposter/scam tokens squatting a popular symbol
+        def base_sym(p):
+            return ((p.get("baseToken") or {}).get("symbol") or "").upper()
+
+        candidates = [p for p in pairs
+                      if is_real(p) and liq(p) > 0 and quote_ok(p) and vol24(p) > 0
+                      and (symbol is None or base_sym(p) == symbol.upper())]
+        if not candidates:
+            return None
+        if wanted_chains:
+            preferred = [p for p in candidates
+                         if (p.get("chainId") or "").lower() in wanted_chains]
+            if preferred:
+                candidates = preferred
+        # rank by 24h volume first (real activity beats fake deep books)
+        return max(candidates, key=lambda p: (vol24(p), liq(p)))
 
     @staticmethod
     def _add_ds_asset(assets: dict, p: dict) -> None:
