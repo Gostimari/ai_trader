@@ -343,7 +343,7 @@ class TestSecretStore:
         assert b"another" not in raw
 
     def test_engine_live_requires_configured_executor(self, db, monkeypatch):
-        c = Constraints(paper_trading=False)
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
         engine = DecisionEngine(db, c, _FakeMarket(), live_executor=None)
         ai_out = json.dumps({
             "analysis_summary": "buy",
@@ -356,7 +356,8 @@ class TestSecretStore:
         assert len(result["executed"]) == 0
         d = db.list_decisions()[0]
         assert d["status"] == "failed"
-        assert "not configured" in d["reason"]
+        # contract-address safety fires before the executor-config check
+        assert "contract address" in d["reason"] or "not configured" in d["reason"]
 
 
 class TestLiveModeGate:
@@ -1794,3 +1795,70 @@ class TestGasWarningSystem:
         d = c.get("/api/wallet/balances").json()
         assert d["configured"] is False
         assert d.get("gas_warnings", []) == []
+
+
+class TestDemoWallet:
+    def _demo(self, db):
+        from memicoin_core.demowallet import DemoWallet
+        return DemoWallet(db)
+
+    def test_gas_reserve_and_investable(self, db):
+        d = self._demo(db)
+        db.demo_set("base", "ETH", 0.01, is_gas=True)
+        assert d.gas_balance("base") == 0.01
+        assert d.investable_gas("base") == pytest.approx(0.01 - 0.00015 * 3)
+
+    def test_swap_deducts_gas_and_balances(self, db):
+        d = self._demo(db)
+        db.demo_set("base", "ETH", 0.01, is_gas=True)
+        db.demo_set("base", "USDC", 100.0)
+        ok, msg = d.swap("base", "USDC", "", "BRETT", "0x532f", 50.0,
+                         price_from=1.0, price_to=0.006)
+        assert ok, msg
+        assert db.demo_get("base", "USDC")["balance"] == pytest.approx(50.0)
+        # bought 50/0.006 = 8333.33 BRETT
+        assert db.demo_get("base", "BRETT", "0x532f")["balance"] == pytest.approx(8333.33, rel=1e-3)
+        # gas deducted
+        assert db.demo_get("base", "ETH")["balance"] == pytest.approx(0.01 - 0.00015)
+
+    def test_swap_refused_without_gas(self, db):
+        d = self._demo(db)
+        db.demo_set("base", "USDC", 100.0)  # no ETH at all
+        ok, msg = d.swap("base", "USDC", "", "BRETT", "0x532f", 50.0, 1.0, 0.006)
+        assert not ok and "insufficient gas" in msg
+
+    def test_swap_refused_insufficient_funds(self, db):
+        d = self._demo(db)
+        db.demo_set("base", "ETH", 0.01, is_gas=True)
+        db.demo_set("base", "USDC", 10.0)
+        ok, msg = d.swap("base", "USDC", "", "BRETT", "0x532f", 50.0, 1.0, 0.006)
+        assert not ok and "insufficient USDC" in msg
+
+    def test_bridge_moves_funds_with_gas(self, db):
+        d = self._demo(db)
+        db.demo_set("ethereum", "ETH", 0.05, is_gas=True)
+        db.demo_set("ethereum", "USDC", 50.0)
+        ok, msg = d.bridge("ethereum", "arc", "USDC", 30.0)
+        assert ok, msg
+        assert db.demo_get("ethereum", "USDC")["balance"] == pytest.approx(20.0)
+        assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(30.0)
+        assert db.demo_get("ethereum", "ETH")["balance"] == pytest.approx(0.05 - 0.0075)
+
+    def test_demo_endpoint_crud(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/demo-wallet", json={"chain": "arc", "asset": "USDC",
+                                             "balance": 25.0, "is_gas": True})
+        assert r.status_code == 200
+        rows = c.get("/api/demo-wallet").json()["rows"]
+        assert rows[0]["chain"] == "arc" and rows[0]["balance"] == 25.0
+        assert rows[0]["value_usd"] == pytest.approx(25.0)  # USDC peg
+        r = c.post("/api/go-demo")
+        assert r.json()["mode"] == "demo"
+        from memicoin_core.settings import load_constraints
+        cc = load_constraints(db)
+        assert cc.paper_trading is False and cc.live_execution_mode == "demo"
+        c.post("/api/demo-wallet/clear")
+        assert c.get("/api/demo-wallet").json()["rows"] == []

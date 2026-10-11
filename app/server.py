@@ -640,3 +640,67 @@ def set_mistral_key(p: MistralKeyPayload):
         return {"ok": True, "configured": False}
     secrets.set("mistral_api_key", key)
     return {"ok": True, "configured": True}
+
+
+# ---------- demo wallet ----------
+class DemoRowPayload(BaseModel):
+    chain: str
+    asset: str
+    balance: float
+    contract: str = ""
+    is_gas: bool = False
+
+
+@app.get("/api/demo-wallet")
+def demo_wallet_rows():
+    from memicoin_core.demowallet import DemoWallet, GAS_COST_PER_TX
+    demo = DemoWallet(db)
+    rows = demo.rows()
+    # value rows at real prices
+    try:
+        prices = market.get_prices()
+        addr_prices = market.get_prices_for_addresses(
+            [r["contract"] for r in rows if r.get("contract")])
+    except MarketDataError:
+        prices, addr_prices = {}, {}
+    out = []
+    for r in rows:
+        p = prices.get(r["asset"].upper(), 0.0)
+        if p <= 0 and r.get("contract"):
+            p = addr_prices.get(r["contract"].lower(), 0.0)
+        if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
+            p = 1.0
+        out.append({**r, "price_usd": p, "value_usd": r["balance"] * p})
+    return {"rows": out, "gas_costs": GAS_COST_PER_TX}
+
+
+@app.post("/api/demo-wallet")
+def demo_wallet_set(p: DemoRowPayload):
+    if p.balance < 0:
+        raise HTTPException(400, "balance must be >= 0")
+    db.demo_set(p.chain.strip().lower(), p.asset.strip().upper(),
+                p.balance, p.contract.strip(), p.is_gas)
+    return {"ok": True}
+
+
+@app.delete("/api/demo-wallet")
+def demo_wallet_delete(chain: str, asset: str, contract: str = ""):
+    db.demo_delete(chain.strip().lower(), asset.strip().upper(), contract.strip())
+    return {"ok": True}
+
+
+@app.post("/api/demo-wallet/clear")
+def demo_wallet_clear():
+    db.demo_clear()
+    return {"ok": True}
+
+
+@app.post("/api/go-demo")
+def go_demo():
+    """Switch to demo-wallet mode: real prices and full pipeline, simulated
+    settlement against the user-built demo wallet."""
+    c = load_constraints(db)
+    c.paper_trading = False
+    c.live_execution_mode = "demo"
+    db.set_setting("constraints", c.to_json())
+    return {"ok": True, "mode": "demo"}

@@ -429,8 +429,50 @@ class DecisionEngine:
                 "reason": f"[PAPER] Bridge {src}->{dst} of {amt} USDC simulated. {reason}"})
 
     def _execute_live(self, cycle_id: str, action: dict, asset: str, amount: float) -> str | None:
+        if self.constraints.live_execution_mode == "demo":
+            return self._execute_demo(cycle_id, action, asset, amount)
         if self.constraints.live_execution_mode == "onchain":
             return self._execute_onchain(cycle_id, action, asset, amount)
+
+    def _execute_demo(self, cycle_id: str, action: dict, asset: str, amount: float) -> str | None:
+        """Demo-wallet execution: identical validation, real DexScreener
+        prices, simulated settlement against the user-built demo wallet
+        (gas deducted, reserve enforced)."""
+        from .demowallet import DemoWallet
+        demo = DemoWallet(self.db)
+        token = action["asset"]
+        if not self._looks_like_address(token):
+            return (f"demo/on-chain swap needs a token contract address for {token!r}; "
+                    f"the AI must provide contract/mint addresses")
+        assets = self.market.get_asset_map()
+        info = assets.get(asset)
+        chain = (info or {}).get("chain") or self.constraints.onchain_chain
+        prices = self.market.get_prices()
+        price_to = prices.get(asset, 0.0)
+        if price_to <= 0:
+            return f"no reliable price for {asset}: refusing demo trade"
+        ok, why = demo.gas_ok(chain)
+        if not ok:
+            return f"gas check failed on {chain}: {why}"
+        stable = "USDC"
+        stable_price = prices.get(stable, 1.0) or 1.0
+        if action["type"] == "buy":
+            cost_usd = amount * price_to
+            ok, msg = demo.swap(chain, stable, "", asset, token,
+                                cost_usd / max(stable_price, 1e-9),
+                                stable_price, price_to)
+        else:
+            ok, msg = demo.swap(chain, asset, token, stable, "",
+                                amount, price_to, stable_price)
+        if not ok:
+            return f"demo execution failed on {chain}: {msg}"
+        self.db.add_decision({
+            "cycle_id": cycle_id, "action": action["type"], "asset_in": asset,
+            "asset_out": stable, "amount": amount, "value_usd": amount * price_to,
+            "status": "executed", "reason": f"[DEMO] {action['reason']}",
+            "tx_id": f"demo-{chain}-{asset[:10]}",
+        })
+        return None
         if self.live_executor is None or not self.live_executor.configured():
             return "live mode selected but exchange API keys are not configured"
         order_action = {**action, "amount": amount}

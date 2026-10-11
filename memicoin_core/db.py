@@ -85,10 +85,14 @@ class Database:
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 usd REAL NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS news_cache (
+            CREATE TABLE IF NOT EXISTS demo_wallet (
                 id TEXT PRIMARY KEY,
-                fetched_at TEXT NOT NULL,
-                payload TEXT NOT NULL
+                chain TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                contract TEXT DEFAULT '',
+                balance REAL NOT NULL DEFAULT 0,
+                is_gas INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(chain, asset, contract)
             );
             """
         )
@@ -212,16 +216,57 @@ class Database:
             )
             self.conn.commit()
 
-    # ---------- news ----------
-    def save_news(self, payload: Any) -> None:
+    # ---------- demo wallet ----------
+    def demo_rows(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM demo_wallet").fetchall()
+        return [dict(r) for r in rows]
+
+    def demo_get(self, chain: str, asset: str, contract: str = "") -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM demo_wallet WHERE chain=? AND asset=? AND contract=?",
+            (chain, asset, contract)).fetchone()
+        return dict(row) if row else None
+
+    def demo_set(self, chain: str, asset: str, balance: float,
+                 contract: str = "", is_gas: bool = False) -> None:
         with _lock:
-            self.conn.execute("DELETE FROM news_cache")
             self.conn.execute(
-                "INSERT INTO news_cache (id, fetched_at, payload) VALUES (?,?,?)",
-                (new_id(), utcnow(), json.dumps(payload)),
+                "INSERT INTO demo_wallet (id, chain, asset, contract, balance, is_gas) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(chain, asset, contract) DO UPDATE SET "
+                "balance=excluded.balance, is_gas=excluded.is_gas",
+                (new_id(), chain, asset, contract, balance, 1 if is_gas else 0),
             )
             self.conn.commit()
 
-    def latest_news(self) -> dict | None:
-        row = self.conn.execute("SELECT * FROM news_cache LIMIT 1").fetchone()
-        return dict(row) if row else None
+    def demo_adjust(self, chain: str, asset: str, delta: float,
+                    contract: str = "", is_gas: bool = False) -> float:
+        """Add delta to a demo balance (can be negative); creates at 0 if new.
+        Returns the new balance. Refuses to go below 0 (returns old)."""
+        with _lock:
+            row = self.conn.execute(
+                "SELECT balance FROM demo_wallet WHERE chain=? AND asset=? AND contract=?",
+                (chain, asset, contract)).fetchone()
+            cur = row["balance"] if row else 0.0
+            new = cur + delta
+            if new < 0:
+                return cur  # insufficient: caller checks
+            self.conn.execute(
+                "INSERT INTO demo_wallet (id, chain, asset, contract, balance, is_gas) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(chain, asset, contract) DO UPDATE SET "
+                "balance=excluded.balance",
+                (new_id(), chain, asset, contract, new, 1 if is_gas else 0),
+            )
+            self.conn.commit()
+            return new
+
+    def demo_delete(self, chain: str, asset: str, contract: str = "") -> None:
+        with _lock:
+            self.conn.execute(
+                "DELETE FROM demo_wallet WHERE chain=? AND asset=? AND contract=?",
+                (chain, asset, contract))
+            self.conn.commit()
+
+    def demo_clear(self) -> None:
+        with _lock:
+            self.conn.execute("DELETE FROM demo_wallet")
+            self.conn.commit()

@@ -156,6 +156,40 @@
       <button type="submit">Save key (encrypted)</button>
     </form>
 
+    <h3 style="margin-top:28px">3c · Demo Wallet — test with realistic fake funds</h3>
+    <p class="hint">Build a fake wallet the bot trades like a real one: real DexScreener prices,
+      real gas costs deducted per transaction, gas reserve enforced — only the blockchain
+      transaction is simulated. Add gas tokens (ETH on base, USDC on arc, ...) and any tokens
+      with amounts you choose, then switch Trading Mode to Real money \u2192 Demo.</p>
+    <div class="controls">
+      <button id="btn-go-demo" class="danger">\ud83d\udcca Use Demo Wallet mode</button>
+    </div>
+    <form id="demo-add-form">
+      <label>Blockchain
+        <select id="demo-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="base">Base</option>
+          <option value="polygon">Polygon</option>
+          <option value="binance-smart-chain">BSC</option>
+          <option value="arc">Arc</option>
+          <option value="solana">Solana</option>
+        </select></label>
+      <label>Token symbol (e.g. ETH for gas, USDC, BRETT)
+        <input type="text" id="demo-asset" placeholder="USDC"></label>
+      <label>Amount
+        <input type="number" id="demo-balance" step="any" min="0" placeholder="100"></label>
+      <label>Contract address (optional; needed for non-gas tokens the AI should trade)
+        <input type="text" id="demo-contract" placeholder="0x... (leave empty for gas/USDC)"></label>
+      <label style="flex-direction: row; align-items: center; gap: 8px;">
+        <input type="checkbox" id="demo-is-gas" style="width: auto;"> This is the gas token (ETH/POL/BNB/SOL/USDC-on-arc)
+      </label>
+      <button type="submit">Add / update</button>
+    </form>
+    <div id="demo-wallet-table"></div>
+    <div class="controls">
+      <button id="btn-demo-clear" class="danger">Clear demo wallet</button>
+    </div>
+
     <h3 style="margin-top:28px">4 · Watchlist — extra assets for the AI</h3>
     <p class="hint">Beyond the built-in meme coins, the AI will analyze and price any asset you add here.
       Data comes from DexScreener (all DEX pairs incl. the Arc ecosystem). Enter token

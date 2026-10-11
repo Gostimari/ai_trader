@@ -452,6 +452,56 @@ function etherscanKeyControls() {
   });
 }
 
+
+async function loadDemoWallet() {
+  const el = $("#demo-wallet-table");
+  if (!el) return;
+  try {
+    const w = await api("/api/demo-wallet");
+    if (!w.rows.length) { el.innerHTML = "<p class='hint'>Demo wallet is empty. Add gas tokens and funds above.</p>"; return; }
+    el.innerHTML = "<table><thead><tr><th>Chain</th><th>Token</th><th>Gas?</th><th>Balance</th><th>Value $</th><th></th></tr></thead><tbody>" +
+      w.rows.map((r) => `<tr><td>${r.chain}</td><td>${r.asset}${r.contract ? " <span class='hint'>" + r.contract.slice(0, 10) + "\u2026</span>" : ""}</td>
+        <td>${r.is_gas ? "\u26fd" : ""}</td><td>${fmt(r.balance, 6)}</td><td>$${fmt(r.value_usd)}</td>
+        <td><button class="danger" data-chain="${r.chain}" data-asset="${r.asset}" data-contract="${r.contract}">Remove</button></td></tr>`).join("") +
+      "</tbody></table>";
+    el.querySelectorAll("button.danger").forEach((b) =>
+      b.addEventListener("click", async () => {
+        const q = `?chain=${encodeURIComponent(b.dataset.chain)}&asset=${encodeURIComponent(b.dataset.asset)}&contract=${encodeURIComponent(b.dataset.contract)}`;
+        await fetch("/api/demo-wallet" + q, { method: "DELETE" });
+        loadDemoWallet();
+      }));
+  } catch (e) { el.innerHTML = "<p class='hint'>Failed to load demo wallet.</p>"; }
+}
+
+function demoWalletControls() {
+  $("#demo-add-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const body = {
+      chain: $("#demo-chain").value,
+      asset: $("#demo-asset").value.trim().toUpperCase(),
+      balance: Number($("#demo-balance").value),
+      contract: $("#demo-contract").value.trim(),
+      is_gas: $("#demo-is-gas").checked,
+    };
+    if (!body.asset || isNaN(body.balance)) return alert("Fill token symbol and amount.");
+    try {
+      await api("/api/demo-wallet", body);
+      $("#demo-asset").value = ""; $("#demo-balance").value = ""; $("#demo-contract").value = "";
+      loadDemoWallet();
+    } catch (e) { alert("Failed: " + e.message); }
+  });
+  $("#btn-demo-clear").addEventListener("click", async () => {
+    if (confirm("Clear ALL demo wallet balances?")) {
+      await api("/api/demo-wallet/clear", {}); loadDemoWallet();
+    }
+  });
+  $("#btn-go-demo").addEventListener("click", async () => {
+    if (!confirm("Switch to DEMO WALLET mode? The bot will trade your fake wallet with real prices, real gas costs, and all constraints. No blockchain transactions are made.")) return;
+    try { const r = await api("/api/go-demo", {}); alert("Demo wallet mode ON. Trades will settle against your demo balances."); refreshModeUI(); }
+    catch (e) { alert("Failed: " + e.message); }
+  });
+}
+
 async function loadWatchlist() {
   try {
     const w = await api("/api/watchlist");
@@ -479,6 +529,8 @@ async function main() {
   buildSeedInputs();
   importModeControls();
   watchlistControls();
+  demoWalletControls();
+  loadDemoWallet();
   etherscanKeyControls();
   loadWalletStatus();
   loadWatchlist();

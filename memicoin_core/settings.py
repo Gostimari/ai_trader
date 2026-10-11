@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 RiskProfile = Literal["safe", "balanced", "aggressive"]
 AutonomyMode = Literal["constrained", "full_control"]
 # exchange = Mode A (CCXT), onchain = Mode B (imported hot wallet + DEX)
-LiveExecutionMode = Literal["exchange", "onchain"]
+LiveExecutionMode = Literal["exchange", "onchain", "demo"]
 
 SETTINGS_VERSION = 1
 
