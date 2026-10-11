@@ -1915,3 +1915,47 @@ class TestModeAwarePortfolio:
         # restore paper for other tests
         cc.paper_trading = True
         db.set_setting("constraints", cc.to_json())
+
+
+class TestDemoGasValuation:
+    def test_demo_eth_valued_via_weth(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        WETH_ETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+        WETH_BASE = "0x4200000000000000000000000000000000000006"
+        db.demo_set("ethereum", "ETH", 0.02, is_gas=True)
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        captured = {}
+        def fake_addr_prices(contracts):
+            captured["c"] = contracts
+            return {WETH_ETH.lower(): 2500.0, WETH_BASE.lower(): 2499.0}
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses", fake_addr_prices)
+        c = TestClient(srv.app)
+        rows = c.get("/api/demo-wallet").json()["rows"]
+        by = {(r["chain"], r["asset"]): r for r in rows}
+        assert by[("ethereum", "ETH")]["value_usd"] == pytest.approx(0.02 * 2500.0)
+        assert by[("base", "ETH")]["value_usd"] == pytest.approx(0.02 * 2499.0)
+        assert by[("arc", "USDC")]["value_usd"] == pytest.approx(50.0)  # peg
+        # both wrapped contracts were requested
+        assert WETH_ETH.lower() in [x.lower() for x in captured["c"]]
+        assert WETH_BASE.lower() in [x.lower() for x in captured["c"]]
+        db.demo_clear()
+
+    def test_demo_view_portfolio_totals_gas(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses",
+                            lambda c: {"0x4200000000000000000000000000000000000006": 2500.0})
+        c = TestClient(srv.app)
+        c.post("/api/go-demo")
+        s = c.get("/api/state").json()
+        assert s["wallet_view"]["total_usd"] == pytest.approx(0.02 * 2500.0)
+        assert s["wallet_view"]["chains"]["base"][0]["value_usd"] == pytest.approx(50.0)
+        c.post("/api/go-paper")
+        db.demo_clear()

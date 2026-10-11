@@ -91,19 +91,30 @@ def _demo_wallet_view():
     """Demo-wallet holdings shaped like the real wallet view."""
     from memicoin_core.demowallet import DemoWallet
     demo = DemoWallet(db)
+    from memicoin_core.demowallet import NATIVE_WRAPPED
+    all_rows = demo.rows()
     try:
         prices = market.get_prices()
-        addr_prices = market.get_prices_for_addresses(
-            [r["contract"] for r in demo.rows() if r.get("contract")])
+        contracts = [r["contract"] for r in all_rows if r.get("contract")]
+        for r in all_rows:
+            if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc":
+                contracts.append(NATIVE_WRAPPED[r["chain"]])
+        addr_prices = market.get_prices_for_addresses(contracts)
     except MarketDataError:
         prices, addr_prices = {}, {}
     chains: dict = {}
     total = 0.0
     gas = {}
-    for r in demo.rows():
+    for r in all_rows:
         p = prices.get(r["asset"].upper(), 0.0)
         if p <= 0 and r.get("contract"):
             p = addr_prices.get(r["contract"].lower(), 0.0)
+        if p <= 0 and r["is_gas"]:
+            wrapped = NATIVE_WRAPPED.get(r["chain"])
+            if r["chain"] == "arc":
+                p = 1.0
+            elif wrapped:
+                p = addr_prices.get(wrapped.lower(), 0.0)
         if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
             p = 1.0
         row = {"symbol": r["asset"], "balance": r["balance"], "value_usd": r["balance"] * p,
@@ -699,10 +710,15 @@ def demo_wallet_rows():
     demo = DemoWallet(db)
     rows = demo.rows()
     # value rows at real prices
+    from memicoin_core.demowallet import NATIVE_WRAPPED
     try:
         prices = market.get_prices()
-        addr_prices = market.get_prices_for_addresses(
-            [r["contract"] for r in rows if r.get("contract")])
+        contracts = [r["contract"] for r in rows if r.get("contract")]
+        # gas/native tokens have no contract: price via their wrapped twin
+        for r in rows:
+            if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc":
+                contracts.append(NATIVE_WRAPPED[r["chain"]])
+        addr_prices = market.get_prices_for_addresses(contracts)
     except MarketDataError:
         prices, addr_prices = {}, {}
     out = []
@@ -710,6 +726,13 @@ def demo_wallet_rows():
         p = prices.get(r["asset"].upper(), 0.0)
         if p <= 0 and r.get("contract"):
             p = addr_prices.get(r["contract"].lower(), 0.0)
+        if p <= 0 and r["is_gas"]:
+            # native coin -> wrapped equivalent (ETH->WETH, etc.); arc USDC -> peg
+            wrapped = NATIVE_WRAPPED.get(r["chain"])
+            if r["chain"] == "arc":
+                p = 1.0
+            elif wrapped:
+                p = addr_prices.get(wrapped.lower(), 0.0)
         if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
             p = 1.0
         out.append({**r, "price_usd": p, "value_usd": r["balance"] * p})

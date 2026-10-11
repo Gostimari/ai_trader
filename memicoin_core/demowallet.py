@@ -16,6 +16,18 @@ log = logging.getLogger("memicoin.demo")
 
 # Gas cost model per chain (in the chain's gas token), conservative:
 # 250k gas at the chain's typical gas price. Arc: USDC at 20 gwei floor.
+
+# Wrapped-native contracts price native coins (ETH/POL/BNB) via DexScreener;
+# verified live. Solana: wrapped SOL mint.
+NATIVE_WRAPPED = {
+    "ethereum": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "base": "0x4200000000000000000000000000000000000006",
+    "polygon": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+    "binance-smart-chain": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+    "solana": "So11111111111111111111111111111111111111112",
+}
+# On Arc USDC is native: priced via the peg in the callers.
+
 GAS_COST_PER_TX = {
     "ethereum": 0.0075,   # 250k * 30 gwei
     "base": 0.00015,      # 250k * ~0.6 gwei (cheap L2)
