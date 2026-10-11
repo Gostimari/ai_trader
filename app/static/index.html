@@ -177,7 +177,12 @@
       <label>Token symbol (e.g. ETH for gas, USDC, BRETT)
         <input type="text" id="demo-asset" placeholder="USDC"></label>
       <label>Amount
-        <input type="number" id="demo-balance" step="any" min="0" placeholder="100"></label>
+        <select id="demo-amount-unit" style="width: 130px;">
+          <option value="token">Token amount (e.g. 0.02 ETH)</option>
+          <option value="usd">USD value (e.g. $50 of ETH)</option>
+        </select>
+        <input type="number" id="demo-balance" step="any" min="0" placeholder="0.02 or 50"></label>
+      <div class="hint" id="demo-amount-hint"></div>
       <label>Contract address (optional; needed for non-gas tokens the AI should trade)
         <input type="text" id="demo-contract" placeholder="0x... (leave empty for gas/USDC)"></label>
       <label style="flex-direction: row; align-items: center; gap: 8px;">

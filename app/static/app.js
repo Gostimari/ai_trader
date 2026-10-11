@@ -513,10 +513,14 @@ function demoWalletControls() {
       balance: Number($("#demo-balance").value),
       contract: $("#demo-contract").value.trim(),
       is_gas: $("#demo-is-gas").checked,
+      amount_is_usd: $("#demo-amount-unit").value === "usd",
     };
     if (!body.asset || isNaN(body.balance)) return alert("Fill token symbol and amount.");
     try {
-      await api("/api/demo-wallet", body);
+      const r = await api("/api/demo-wallet", body);
+      if (body.amount_is_usd) {
+        alert(`Stored ${r.stored_balance.toFixed(6)} ${body.asset} (converted from $${body.balance} at the live price).`);
+      }
       $("#demo-asset").value = ""; $("#demo-balance").value = ""; $("#demo-contract").value = "";
       loadDemoWallet();
     } catch (e) { alert("Failed: " + e.message); }

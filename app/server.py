@@ -702,6 +702,38 @@ class DemoRowPayload(BaseModel):
     balance: float
     contract: str = ""
     is_gas: bool = False
+    amount_is_usd: bool = False
+
+
+def _demo_price_for(chain: str, asset: str, contract: str, is_gas: bool) -> float:
+    """Live USD price for a demo-wallet asset (mirror of the valuation logic)."""
+    from memicoin_core.demowallet import NATIVE_WRAPPED
+    try:
+        prices = market.get_prices()
+    except MarketDataError:
+        prices = {}
+    p = prices.get(asset.upper(), 0.0)
+    contracts = []
+    wrapped = NATIVE_WRAPPED.get(chain)
+    if is_gas:
+        if chain == "arc":
+            return 1.0
+        if wrapped:
+            contracts.append(wrapped)
+    if contract:
+        contracts.append(contract)
+    if p <= 0 and contracts:
+        try:
+            addr = market.get_prices_for_addresses(contracts)
+            for c in contracts:
+                if addr.get(c.lower(), 0) > 0:
+                    p = addr[c.lower()]
+                    break
+        except MarketDataError:
+            pass
+    if p <= 0 and asset.upper() in ("USDC", "USDT"):
+        p = 1.0
+    return p
 
 
 @app.get("/api/demo-wallet")
@@ -743,9 +775,20 @@ def demo_wallet_rows():
 def demo_wallet_set(p: DemoRowPayload):
     if p.balance < 0:
         raise HTTPException(400, "balance must be >= 0")
-    db.demo_set(p.chain.strip().lower(), p.asset.strip().upper(),
-                p.balance, p.contract.strip(), p.is_gas)
-    return {"ok": True}
+    chain = p.chain.strip().lower()
+    asset = p.asset.strip().upper()
+    balance = p.balance
+    if p.amount_is_usd:
+        # convert the fiat amount to a token quantity at the live price
+        price = _demo_price_for(chain, asset, p.contract.strip(), p.is_gas)
+        if price <= 0:
+            raise HTTPException(400, f"no live price for {asset} on {chain}: "
+                                       "cannot convert a USD amount. Enter the token "
+                                       "quantity instead, or try again in a moment.")
+        balance = p.balance / price
+    db.demo_set(chain, asset, balance, p.contract.strip(), p.is_gas)
+    return {"ok": True, "stored_balance": balance,
+            "price_used": (p.balance / balance) if balance else 0}
 
 
 @app.delete("/api/demo-wallet")

@@ -1959,3 +1959,60 @@ class TestDemoGasValuation:
         assert s["wallet_view"]["chains"]["base"][0]["value_usd"] == pytest.approx(50.0)
         c.post("/api/go-paper")
         db.demo_clear()
+
+
+class TestDemoUsdAmounts:
+    def test_usd_amount_converted_to_token_quantity(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses",
+                            lambda c: {"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": 2500.0})
+        c = TestClient(srv.app)
+        # $50 of ETH on ethereum (gas) -> 0.02 ETH
+        r = c.post("/api/demo-wallet", json={
+            "chain": "ethereum", "asset": "ETH", "balance": 50.0,
+            "is_gas": True, "amount_is_usd": True})
+        assert r.status_code == 200
+        assert r.json()["stored_balance"] == pytest.approx(0.02)
+        row = db.demo_get("ethereum", "ETH")
+        assert row["balance"] == pytest.approx(0.02)
+        db.demo_clear()
+
+    def test_usd_amount_arc_usdc_peg(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/demo-wallet", json={
+            "chain": "arc", "asset": "USDC", "balance": 50.0,
+            "is_gas": True, "amount_is_usd": True})
+        assert r.status_code == 200
+        assert r.json()["stored_balance"] == pytest.approx(50.0)  # 1:1
+        db.demo_clear()
+
+    def test_usd_amount_unpriceable_rejected(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses", lambda c: {})
+        c = TestClient(srv.app)
+        r = c.post("/api/demo-wallet", json={
+            "chain": "ethereum", "asset": "WEIRDCOIN", "balance": 50.0,
+            "amount_is_usd": True})
+        assert r.status_code == 400
+        assert "no live price" in r.json()["detail"]
+        db.demo_clear()
+
+    def test_token_amount_still_works_as_before(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/demo-wallet", json={
+            "chain": "ethereum", "asset": "ETH", "balance": 0.02,
+            "is_gas": True, "amount_is_usd": False})
+        assert r.json()["stored_balance"] == pytest.approx(0.02)
+        db.demo_clear()
