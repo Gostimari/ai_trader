@@ -1632,13 +1632,35 @@ class TestGasFeasibility:
         assert not ok and "insufficient gas" in why
         assert "Top up" in why
 
-    def test_arc_always_gas_ok(self):
+    def test_arc_gas_ok_with_balance(self):
         from memicoin_core.onchain import EVMWallet
         w = EVMWallet.__new__(EVMWallet)
         w.chain = "arc"
         w.cfg = {"native_symbol": "USDC", "chain_id": 5042}
+        w._acct = None
+        def nb(): return 5.0
+        w.native_balance = nb
+        w.w3 = type("W3", (), {
+            "from_wei": staticmethod(lambda v, u: v / 1e18),
+            "eth": type("Eth", (), {"gas_price": 20 * 10**9}),
+        })()
         ok, why = w.gas_ok()
-        assert ok  # USDC is the gas token: no separate gas needed
+        assert ok  # USDC balance covers gas on arc
+
+    def test_arc_gas_fails_with_zero_usdc(self):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "arc"
+        w.cfg = {"native_symbol": "USDC", "chain_id": 5042}
+        w._acct = None
+        def nb(): return 0.0
+        w.native_balance = nb
+        w.w3 = type("W3", (), {
+            "from_wei": staticmethod(lambda v, u: v / 1e18),
+            "eth": type("Eth", (), {"gas_price": 20 * 10**9}),
+        })()
+        ok, why = w.gas_ok()
+        assert not ok and "top up USDC" in why  # honest: no USDC = no gas even on arc
 
     def test_executor_preflight_blocks_gasless_chain(self, db, monkeypatch):
         c = Constraints(paper_trading=False, live_execution_mode="onchain",
@@ -1661,3 +1683,58 @@ class TestGasFeasibility:
             {"type": "buy", "asset": "0x" + "2" * 40,
              "amount": 1, "reason": "r"}, "0x" + "2" * 40, 1.0)
         assert err is not None and "gas check failed" in err
+
+
+class TestGasReserve:
+    def _wallet(self, native, chain="ethereum", gas_price=30 * 10**9):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = chain
+        w.cfg = {"native_symbol": "ETH", "chain_id": 1}
+        w._acct = None
+        def nb(): return native
+        w.native_balance = nb
+        w.w3 = type("W3", (), {
+            "from_wei": staticmethod(lambda v, u: v / 1e18),
+            "eth": type("Eth", (), {"gas_price": gas_price}),
+        })()
+        return w
+
+    def test_reserve_is_multiple_of_swap_cost(self):
+        w = self._wallet(native=0.5)
+        # 250k * 30gwei = 0.0075 per swap; reserve = 3 swaps = 0.0225
+        assert w.gas_reserve() == pytest.approx(0.0225)
+
+    def test_investable_excludes_reserve(self):
+        w = self._wallet(native=0.5)
+        assert w.investable_native() == pytest.approx(0.5 - 0.0225)
+
+    def test_investable_never_negative(self):
+        w = self._wallet(native=0.001)
+        assert w.investable_native() == 0.0
+
+    def test_native_buy_refused_beyond_investable(self):
+        w = self._wallet(native=0.5)
+        res = w.swap_exact_eth_for_tokens("0x" + "3" * 40, 0.49)
+        assert not res.ok and "gas reserve protection" in res.error
+        assert "reserve" in res.error
+
+    def test_native_buy_ok_within_investable(self):
+        w = self._wallet(native=0.5)
+        res = w.swap_exact_eth_for_tokens("0x" + "3" * 40, 0.4)
+        assert res.ok or "router" in res.error or "wrapped" in res.error
+        # passes the reserve gate (fails later only for router config)
+
+    def test_arc_usdc_reserve_also_enforced(self):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "arc"
+        w.cfg = {"native_symbol": "USDC", "chain_id": 5042}
+        w._acct = None
+        def nb(): return 1.0
+        w.native_balance = nb
+        w.w3 = type("W3", (), {
+            "from_wei": staticmethod(lambda v, u: v / 1e18),
+            "eth": type("Eth", (), {"gas_price": 20 * 10**9}),  # arc 20 gwei floor
+        })()
+        assert w.investable_native() < 1.0  # reserve held back on arc too

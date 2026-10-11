@@ -150,19 +150,35 @@ class EVMWallet:
         return float(self.w3.from_wei(typical_swap_gas * price, "ether"))
 
     def gas_ok(self, buffer: float = 1.5) -> tuple[bool, str]:
-        """Can the wallet pay gas for one swap? Arc always passes: USDC is
-        the gas token there and the wallet's USDC balance IS the gas."""
+        """Can the wallet pay gas for one swap? Arc passes structurally (USDC
+        is the gas token) but its balance still needs to cover the reserve."""
         native_symbol = self.cfg.get("native_symbol", "ETH")
-        if native_symbol == "USDC":
-            return True, ""
         bal = self.gas_balance()
         need = self.estimated_gas_cost() * buffer
+        if native_symbol == "USDC":
+            if bal >= need:
+                return True, ""
+            return False, (f"insufficient USDC on {self.chain} even for gas "
+                           f"({bal:.4f} < ~{need:.4f}): top up USDC")
         if bal < need:
             return False, (f"insufficient gas: {bal:.6f} {native_symbol} < "
                            f"~{need:.6f} needed for one swap. Top up {native_symbol} "
                            f"on {self.chain} (a tiny amount suffices) or move "
                            f"activity to Arc where USDC pays gas.")
         return True, ""
+
+    # ---------- gas reserve ----------
+    RESERVE_SWAPS = 3  # keep enough gas for ~3 future transactions
+
+    def gas_reserve(self) -> float:
+        """Native-token amount held back exclusively for future gas.
+        Applies to ALL chains incl. Arc (where USDC itself pays gas)."""
+        return self.estimated_gas_cost() * self.RESERVE_SWAPS
+
+    def investable_native(self) -> float:
+        """How much of the native/gas token the bot may safely spend
+        (invest) without stranding the wallet: balance minus the reserve."""
+        return max(0.0, self.gas_balance() - self.gas_reserve())
 
 # ---------- writes ----------
     def _send(self, tx: dict) -> str:
@@ -257,8 +273,17 @@ class EVMWallet:
                 f"on this chain until one is set (MEMICOIN_{self.chain.upper().replace('-', '_')}_ROUTER)")
 
     def swap_exact_eth_for_tokens(self, token_out: str, eth_amount: float) -> TxResult:
-        """Buy with native currency (ETH/MATIC/BNB) through WETH path."""
+        """Buy with native currency (ETH/MATIC/BNB/USDC-on-Arc) through the
+        wrapped path. Enforces the gas reserve: spending beyond
+        investable_native() is refused, never clamped silently."""
         try:
+            investable = self.investable_native()
+            if eth_amount > investable + 1e-12:
+                return TxResult(
+                    False,
+                    error=(f"gas reserve protection: {eth_amount:.6f} exceeds "
+                           f"investable {investable:.6f} (reserve "
+                           f"{self.gas_reserve():.6f} kept for fees)"))
             router = self._router()
             if not router:
                 return TxResult(False, error=self._no_router_error())

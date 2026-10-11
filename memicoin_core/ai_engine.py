@@ -283,6 +283,27 @@ class DecisionEngine:
             f"- Solana key imported: {solana_key} "
             f"({'Solana assets allowed' if solana_key == 'yes' else 'do NOT propose Solana assets'})\n"
             f"- CCTP-bridgeable USDC chains: {', '.join(CCTP_DOMAINS)} (bridge action available)")
+        # gas reserves: what's investable per chain (real mode only)
+        if not self.constraints.paper_trading and self._onchain_secrets is not None \
+                and self._onchain_secrets.has("onchain_private_key"):
+            try:
+                from .onchain import EVMWallet, EVM_CHAINS
+                lines = []
+                for chain in EVM_CHAINS:
+                    try:
+                        w = EVMWallet(self._onchain_secrets, chain)
+                        lines.append(
+                            f"  {chain}: {w.investable_native():.6f} {EVM_CHAINS[chain].get('native_symbol', 'ETH')} "
+                            f"investable (reserve {w.gas_reserve():.6f} kept for gas)")
+                    except Exception:
+                        continue
+                if lines:
+                    parts.append("## Gas reserve (NEVER spend into the reserve)\n"
+                                 "A gas reserve is held back on each chain for future "
+                                 "transaction fees. Only the 'investable' amount may "
+                                 "be traded:\n" + "\n".join(lines))
+            except Exception:
+                pass
         market_rows = [
             {k: a.get(k) for k in ("asset", "name", "chain", "price_usd", "change_24h_pct",
                                    "change_7d_pct", "volume_24h_usd", "market_cap_usd")}

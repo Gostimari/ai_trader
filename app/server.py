@@ -318,6 +318,8 @@ def wallet_balances():
                     "balance": w.gas_balance(),
                     "symbol": EVM_CHAINS[chain].get("native_symbol", "ETH"),
                     "needed": w.estimated_gas_cost() * 1.5,
+                    "reserve": w.gas_reserve(),
+                    "investable": w.investable_native(),
                     "hint": why,
                 }
             except Exception:

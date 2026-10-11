@@ -331,7 +331,7 @@ async function loadWalletBalances() {
     // gas health strip
     const gas = w.gas || {};
     const gasRows = Object.entries(gas).map(([chain, g]) =>
-      `<span class="gas-pill ${g.ok ? "ok" : "bad"}">${chain}: ${fmt(g.balance, 5)} ${g.symbol} ${g.ok ? "\u2705" : "\u26a0\ufe0f " + (g.hint || "low gas")}</span>`).join(" ");
+      `<span class="gas-pill ${g.ok ? "ok" : "bad"}">${chain}: ${fmt(g.balance, 5)} ${g.symbol} ${g.ok ? "\u2705 investable " + fmt(g.investable ?? g.balance, 5) : "\u26a0\ufe0f " + (g.hint || "low gas")}</span>`).join(" ");
     const gasEl = $("#gas-health");
     if (gasEl) gasEl.innerHTML = gasRows
       ? "<div class=\"gas-strip\">" + gasRows + "</div>" : "";
