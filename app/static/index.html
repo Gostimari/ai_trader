@@ -141,6 +141,21 @@
       <button type="button" id="btn-wallet-delete" class="danger">Remove wallet from app</button>
     </form>
 
+    <h3 style="margin-top:28px">3b · Auto-discovery of your tokens</h3>
+    <p class="hint">Automatically find every token your linked wallet holds.
+      <b>Solana: fully automatic</b> (tokens are enumerable on-chain — nothing to configure).
+      <b>EVM chains (Ethereum, Base, Polygon, BSC, Arc):</b> paste a free
+      <a href="https://etherscan.io/apis" target="_blank" rel="noopener">Etherscan API key</a>
+      (one key covers all Etherscan-family chains via their V2 API) and the app lists
+      every contract your wallet ever transacted, then reads the real balances on-chain.
+      Without a key, only Watchlist tokens are shown.</p>
+    <form id="etherscan-key-form">
+      <label>Etherscan API key (optional, free tier is enough)
+        <input type="password" id="etherscan-key" autocomplete="off" placeholder="paste key and save"></label>
+      <div id="etherscan-key-status" class="hint"></div>
+      <button type="submit">Save key (encrypted)</button>
+    </form>
+
     <h3 style="margin-top:28px">4 · Watchlist — extra assets for the AI</h3>
     <p class="hint">Beyond the built-in meme coins, the AI will analyze and price any asset you add here.
       Data comes from DexScreener (all DEX pairs incl. the Arc ecosystem). Enter token
@@ -159,7 +174,9 @@
     <p class="hint" id="wallet-hint"></p>
     <p class="hint">Tokens shown = native coins + tokens from your Watchlist. Hold a token
       that's missing? Add its <b>contract address</b> in Settings \u00b7 4 Watchlist and it
-      appears here (and gets priced for the AI). TON tokens are not supported.</p>
+      appears here (and gets priced for the AI). With an Etherscan key (Settings \u00b7 3b),
+      discovery is fully automatic. Solana tokens are always discovered automatically.
+      TON tokens are not supported.</p>
     <div id="wallet-balances"></div>
   </section>
 

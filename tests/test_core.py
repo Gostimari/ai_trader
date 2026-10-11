@@ -1248,3 +1248,88 @@ class TestWatchlistTokenBalances:
         d = c.get("/api/wallet/balances").json()
         assert d["chains"]["base"][0]["symbol"] == "BRETT"
         assert captured["extra"]["base"][0]["symbol"] == "BRETT"
+
+
+class TestTokenDiscovery:
+    def test_etherscan_v2_parse(self, monkeypatch):
+        import memicoin_core.discovery as disc
+        class _FakeResp:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"status": "1", "result": [
+                    {"contractAddress": "0xAAA", "tokenSymbol": "ARCAT", "tokenDecimal": "18"},
+                    {"contractAddress": "0xBBB", "tokenSymbol": "ARGUS", "tokenDecimal": "18"},
+                    {"contractAddress": "0xAAA", "tokenSymbol": "ARCAT", "tokenDecimal": "18"},
+                ]}
+        monkeypatch.setattr(disc.requests, "get", lambda *a, **kw: _FakeResp())
+        out = disc.discover_evm_tokens("0xwallet", "key", chains=["arc"])
+        syms = {t["symbol"] for t in out["arc"]}
+        assert syms == {"ARCAT", "ARGUS"}
+        assert len(out["arc"]) == 2  # deduped
+
+    def test_etherscan_no_history_is_empty(self, monkeypatch):
+        import memicoin_core.discovery as disc
+        class _FakeResp:
+            def raise_for_status(self): pass
+            def json(self): return {"status": "0", "result": None}
+        monkeypatch.setattr(disc.requests, "get", lambda *a, **kw: _FakeResp())
+        assert disc.discover_evm_tokens("0xw", "key", chains=["arc"]) == {}
+
+    def test_solana_discovery_parse(self, monkeypatch):
+        import memicoin_core.discovery as disc
+        class _FakeResp:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"result": {"value": [
+                    {"account": {"data": {"parsed": {"info": {
+                        "mint": "MintAAA", "tokenAmount": {"uiAmount": 12.5}}}}}},
+                    {"account": {"data": {"parsed": {"info": {
+                        "mint": "MintBBB", "tokenAmount": {"uiAmount": 0}}}}}},
+                ]}}
+        monkeypatch.setattr(disc.requests, "post", lambda *a, **kw: _FakeResp())
+        toks = disc.discover_solana_tokens("SomePubkey")
+        assert len(toks) == 1 and toks[0]["address"] == "MintAAA"
+        assert toks[0]["balance"] == 12.5
+
+    def test_etherscan_key_endpoint(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/etherscan-key", json={"api_key": "EK123"})
+        assert r.status_code == 200 and r.json()["configured"] is True
+        assert "EK123" not in r.text
+        r = c.post("/api/etherscan-key", json={"api_key": ""})
+        assert r.json()["configured"] is False
+
+    def test_discovery_merged_into_balances(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        import memicoin_core.discovery as disc
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has",
+                            lambda k: k in ("onchain_private_key", "etherscan_api_key"))
+        monkeypatch.setattr(srv.secrets, "get",
+                            lambda k: {"onchain_private_key": "0x" + "1" * 64,
+                                       "etherscan_api_key": "key"}.get(k))
+        class _FakeResp:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"status": "1", "result": [
+                    {"contractAddress": "0x" + "c" * 40, "tokenSymbol": "ARCAT",
+                     "tokenDecimal": "18"}]}
+        monkeypatch.setattr(disc.requests, "get", lambda *a, **kw: _FakeResp())
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        class _FakeW:
+            def __init__(self, s, chain): pass
+            def native_balance(self): return 0.0
+            def erc20_balance(self, addr):
+                return 77.0 if addr.endswith("c" * 40) else 0.0
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        c = TestClient(srv.app)
+        d = c.get("/api/wallet/balances").json()
+        found = [t for rows in d["chains"].values() for t in rows
+                 if t.get("symbol") == "ARCAT"]
+        assert found and found[0]["balance"] == 77.0

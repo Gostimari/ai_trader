@@ -418,6 +418,21 @@ function mistralKeyControls() {
   });
 }
 
+
+function etherscanKeyControls() {
+  $("#etherscan-key-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const key = $("#etherscan-key").value.trim();
+    try {
+      const r = await api("/api/etherscan-key", { api_key: key });
+      $("#etherscan-key").value = "";
+      $("#etherscan-key-status").textContent = key
+        ? "\u2705 Key saved. Your EVM tokens will be discovered automatically."
+        : "Key removed — only Watchlist tokens will be shown.";
+    } catch (e) { alert("Failed: " + e.message); }
+  });
+}
+
 async function loadWatchlist() {
   try {
     const w = await api("/api/watchlist");
@@ -445,6 +460,7 @@ async function main() {
   buildSeedInputs();
   importModeControls();
   watchlistControls();
+  etherscanKeyControls();
   loadWalletStatus();
   loadWatchlist();
   refreshModeUI();
