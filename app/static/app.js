@@ -442,6 +442,8 @@ async function main() {
   modeControls();
   mistralKeyControls();
   walletControls();
+  buildSeedInputs();
+  importModeControls();
   watchlistControls();
   loadWalletStatus();
   loadWatchlist();
