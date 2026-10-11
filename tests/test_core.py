@@ -1382,3 +1382,50 @@ class TestAddressPricing:
         d = c.get("/api/wallet/balances").json()
         row = d["chains"]["arc"][0]
         assert row["symbol"] == "ARGUS" and row["value_usd"] == pytest.approx(25.0)
+
+
+class TestNativeAndStablecoinValuation:
+    def test_eth_on_base_valued_via_weth(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        WETH_BASE = "0x4200000000000000000000000000000000000006"
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses",
+                            lambda contracts: {WETH_BASE.lower(): 2500.0})
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                           lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 2.0, "tokens": []}}},
+            "solana": None})
+        c = TestClient(srv.app)
+        d = c.get("/api/wallet/balances").json()
+        row = d["chains"]["base"][0]
+        assert row["symbol"] == "ETH" and row["value_usd"] == pytest.approx(5000.0)
+
+    def test_arc_native_usdc_peg_floor(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses", lambda contracts: {})
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                           lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "arc": {"native_symbol": "USDC", "native": 15.0, "tokens": []}}},
+            "solana": None})
+        c = TestClient(srv.app)
+        d = c.get("/api/wallet/balances").json()
+        row = d["chains"]["arc"][0]
+        assert row["symbol"] == "USDC" and row["value_usd"] == pytest.approx(15.0)
+
+    def test_usdc_on_base_read_via_known_list(self, monkeypatch):
+        from memicoin_core.onchain import EVM_TOKENS
+        usdc = [t for t in EVM_TOKENS.get("base", []) if t[0] == "USDC"]
+        assert usdc and usdc[0][1] == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"

@@ -342,9 +342,14 @@ def wallet_for(chain: str, secrets: SecretStore):
 # addresses must never be hardcoded here - the watchlist (user-supplied,
 # DexScreener-indexed) covers additional tokens.
 EVM_TOKENS = {
+    # Circle-documented USDC deployments (verified from Circle's docs):
+    "ethereum": [("USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6)],
+    "base": [("USDC", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6)],
+    "polygon": [("USDC", "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", 6)],
     "arc": [("CIRBTC", "0x171a4217b86a807a64eb94757db6849fb4bdbaa0", 18)],
 }
 # Arc quirk: USDC is the native gas token there (18 decimals) - read as native.
+# BSC: no Circle-native USDC; native BNB read via native balance.
 
 
 

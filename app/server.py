@@ -166,6 +166,17 @@ def wallet_balances():
     except MarketDataError:
         prices, asset_map = {}, {}
 
+    # Native coins have no contract of their own; DexScreener prices their
+    # WRAPPED equivalents. Map native -> wrapped contract per chain so the
+    # batch pricer can value native balances (ETH on Base, POL, BNB, ...).
+    NATIVE_WRAPPED = {
+        "ethereum": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",  # WETH
+        "base": "0x4200000000000000000000000000000000000006",      # WETH (base)
+        "polygon": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",   # WPOL
+        "binance-smart-chain": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+        "solana": "So11111111111111111111111111111111111111112",   # wrapped SOL
+    }
+
     # batch-price every contract the wallet holds so discovered tokens get
     # real USD values: contracts come from the RAW balance data (rows are
     # built below), priced via DexScreener in batches of 30
@@ -181,6 +192,12 @@ def wallet_balances():
         c = t.get("contract") or t.get("address") or ""
         if c and len(c) >= 32:
             all_contracts.append(c)
+    # wrapped-native contracts price the native balances
+    for chain, entry in evm_raw.items():
+        if entry.get("native", 0) > 0 and chain in NATIVE_WRAPPED:
+            all_contracts.append(NATIVE_WRAPPED[chain])
+    if (sol_raw.get("native") or 0) > 0:
+        all_contracts.append(NATIVE_WRAPPED["solana"])
     addr_prices: dict = {}
     try:
         if all_contracts:
@@ -198,13 +215,20 @@ def wallet_balances():
         p = prices.get(symbol.upper(), 0.0)
         if p <= 0 and contract:
             p = addr_prices.get(contract.lower(), 0.0)
+        # stablecoin peg floor: USDC/USDT/EURC are ~$1 by definition; on Arc
+        # USDC is native with no wrapped contract, so market data can miss it
+        if p <= 0 and symbol.upper() in ("USDC", "USDT"):
+            p = 1.0
         return balance * p
 
     evm = raw.get("evm")
     if evm:
         for chain, entry in (evm.get("chains") or {}).items():
             sym = entry.get("native_symbol", native_prices.get(chain, "ETH"))
-            native_usd = value_of(sym if sym in prices else native_prices.get(chain, ""), entry.get("native", 0.0))
+            wrapped = NATIVE_WRAPPED.get(chain, "")
+            native_usd = value_of(
+                sym if sym in prices else native_prices.get(chain, ""),
+                entry.get("native", 0.0), wrapped)
             rows = []
             if entry.get("native", 0) > 0:
                 rows.append({"symbol": sym, "balance": entry["native"], "value_usd": native_usd,
@@ -220,7 +244,7 @@ def wallet_balances():
     if sol:
         rows = []
         if sol.get("native", 0) > 0:
-            v = value_of("SOL", sol["native"])
+            v = value_of("SOL", sol["native"], NATIVE_WRAPPED["solana"])
             rows.append({"symbol": "SOL", "balance": sol["native"], "value_usd": v,
                          "chain": "solana", "kind": "native"})
             total += v
