@@ -63,8 +63,21 @@ def state():
                      "total_pnl_usd": 0, "total_pnl_pct": 0, "total_cost_basis_usd": 0,
                      "as_of": None}
         market_ok = False
+    mode = ("paper" if constraints.paper_trading
+            else ("demo" if constraints.live_execution_mode == "demo" else "real"))
+    # portfolio section content follows the mode:
+    # paper -> virtual positions; real -> wallet holdings; demo -> demo wallet
+    wallet_view = None
+    if mode != "paper":
+        try:
+            wb = wallet_balances() if mode == "real" else _demo_wallet_view()
+            wallet_view = wb
+        except Exception:
+            wallet_view = None
     return {
         "portfolio": portfolio,
+        "mode": mode,
+        "wallet_view": wallet_view,
         "constraints": constraints.to_json(),
         "market_ok": market_ok,
         "trading_paused": constraints.trading_paused,
@@ -72,6 +85,35 @@ def state():
         "paper_trading": constraints.paper_trading,
         "total_pnl_pct": portfolio.get("total_pnl_pct", 0),
     }
+
+
+def _demo_wallet_view():
+    """Demo-wallet holdings shaped like the real wallet view."""
+    from memicoin_core.demowallet import DemoWallet
+    demo = DemoWallet(db)
+    try:
+        prices = market.get_prices()
+        addr_prices = market.get_prices_for_addresses(
+            [r["contract"] for r in demo.rows() if r.get("contract")])
+    except MarketDataError:
+        prices, addr_prices = {}, {}
+    chains: dict = {}
+    total = 0.0
+    gas = {}
+    for r in demo.rows():
+        p = prices.get(r["asset"].upper(), 0.0)
+        if p <= 0 and r.get("contract"):
+            p = addr_prices.get(r["contract"].lower(), 0.0)
+        if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
+            p = 1.0
+        row = {"symbol": r["asset"], "balance": r["balance"], "value_usd": r["balance"] * p,
+               "chain": r["chain"], "kind": "gas" if r["is_gas"] else "token",
+               "contract": r.get("contract", "")}
+        chains.setdefault(r["chain"], []).append(row)
+        total += row["value_usd"]
+        if r["is_gas"]:
+            gas[r["chain"]] = row["balance"]
+    return {"chains": chains, "total_usd": total, "gas": gas}
 
 
 class EtherscanKeyPayload(BaseModel):

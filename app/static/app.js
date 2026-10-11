@@ -21,27 +21,58 @@ function tabs() {
     }));
 }
 
+function renderPaperPortfolio(p) {
+  $("#portfolio-cards").innerHTML = `
+    <div class="card"><div class="k">Total value (paper)</div><div class="v">$${fmt(p.total_value_usd)}</div></div>
+    <div class="card"><div class="k">Cash (USD)</div><div class="v">$${fmt(p.cash_usd)}</div></div>
+    <div class="card"><div class="k">Total P&L</div><div class="v ${pnlClass(p.total_pnl_usd)}">$${fmt(p.total_pnl_usd)}</div></div>
+    <div class="card"><div class="k">Total P&L %</div><div class="v ${pnlClass(p.total_pnl_pct)}">${fmt(p.total_pnl_pct, 1)}%</div></div>`;
+  $("#positions-table tbody").innerHTML = (p.positions || []).map((x) => `
+    <tr><td>${x.asset}</td><td>${x.chain || ""}</td><td>${fmt(x.quantity, 4)}</td>
+    <td>$${fmt(x.value_usd)}</td>
+    <td class="${pnlClass(x.unrealized_pnl_usd)}">$${fmt(x.unrealized_pnl_usd)}</td>
+    <td class="${pnlClass(x.unrealized_pnl_pct)}">${fmt(x.unrealized_pnl_pct, 1)}%</td></tr>`).join("")
+    || `<tr><td colspan="6" class="hint">No positions yet. Run a decision cycle.</td></tr>`;
+}
+
+function renderWalletPortfolio(w, mode) {
+  const label = mode === "demo" ? "Demo wallet" : "Wallet";
+  if (!w) {
+    $("#portfolio-cards").innerHTML = `<div class="card"><div class="k">${label}</div><div class="v">no wallet</div></div>`;
+    $("#positions-table tbody").innerHTML = `<tr><td colspan="6" class="hint">No wallet data. ${mode === "demo" ? "Add funds in Settings \u00b7 3c Demo Wallet." : "Import a wallet in Settings \u00b7 3."}</td></tr>`;
+    return;
+  }
+  const all = Object.entries(w.chains || {}).flatMap(([chain, rows]) =>
+    rows.map((r) => ({ ...r, chain })));
+  const total = w.total_usd || 0;
+  $("#portfolio-cards").innerHTML = `
+    <div class="card"><div class="k">${label} total</div><div class="v">$${fmt(total)}</div></div>
+    <div class="card"><div class="k">Chains</div><div class="v">${Object.keys(w.chains || {}).length}</div></div>
+    <div class="card"><div class="k">Assets</div><div class="v">${all.length}</div></div>
+    <div class="card"><div class="k">Mode</div><div class="v">${mode === "demo" ? "DEMO" : "REAL"}</div></div>`;
+  $("#positions-table tbody").innerHTML = all.sort((a, b) => b.value_usd - a.value_usd).map((r) => `
+    <tr><td>${r.symbol}${r.kind === "gas" ? " \u26fd" : ""}</td><td>${r.chain}</td><td>${fmt(r.balance, 6)}</td>
+    <td>$${fmt(r.value_usd)}</td><td>-</td><td>-</td></tr>`).join("")
+    || `<tr><td colspan="6" class="hint">Wallet empty.</td></tr>`;
+}
+
 async function loadState() {
   try {
     const s = await api("/api/state");
-    $("#mode-badge").textContent = s.paper_trading ? "PAPER TRADING" : "LIVE TRADING";
-    $("#mode-badge").classList.toggle("live", !s.paper_trading);
-
-    const p = s.portfolio;
-    $("#portfolio-cards").innerHTML = `
-      <div class="card"><div class="k">Total value</div><div class="v">$${fmt(p.total_value_usd)}</div></div>
-      <div class="card"><div class="k">Cash (USD)</div><div class="v">$${fmt(p.cash_usd)}</div></div>
-      <div class="card"><div class="k">Total P&L</div><div class="v ${pnlClass(p.total_pnl_usd)}">$${fmt(p.total_pnl_usd)}</div></div>
-      <div class="card"><div class="k">Total P&L %</div><div class="v ${pnlClass(p.total_pnl_pct)}">${fmt(p.total_pnl_pct, 1)}%</div></div>`;
-    $("#positions-table tbody").innerHTML = (p.positions || []).map((x) => `
-      <tr><td>${x.asset}</td><td>${x.chain || ""}</td><td>${fmt(x.quantity, 4)}</td>
-      <td>$${fmt(x.value_usd)}</td>
-      <td class="${pnlClass(x.unrealized_pnl_usd)}">$${fmt(x.unrealized_pnl_usd)}</td>
-      <td class="${pnlClass(x.unrealized_pnl_pct)}">${fmt(x.unrealized_pnl_pct, 1)}%</td></tr>`).join("")
-      || `<tr><td colspan="6" class="hint">No positions yet. Run a decision cycle.</td></tr>`;
+    const mode = s.mode || "paper";
+    $("#mode-badge").textContent = mode === "paper" ? "PAPER TRADING"
+      : mode === "demo" ? "DEMO WALLET" : "LIVE TRADING";
+    $("#mode-badge").classList.toggle("live", mode !== "paper");
+    if (mode === "paper") {
+      renderPaperPortfolio(s.portfolio);
+      $("#btn-reset").classList.remove("hidden");
+    } else {
+      renderWalletPortfolio(s.wallet_view, mode);
+      $("#btn-reset").classList.add("hidden");
+    }
     const badges = [];
-    if (s.trading_paused) badges.push("⏸ PAUSED");
-    if (s.emergency_stopped) badges.push("🛑 EMERGENCY STOP");
+    if (s.trading_paused) badges.push("\u23f8 PAUSED");
+    if (s.emergency_stopped) badges.push("\ud83d\uded1 EMERGENCY STOP");
     $("#status-badges").innerHTML = badges.map((b) => `<span class="badge live">${b}</span>`).join("");
     $("#btn-resume").classList.toggle("hidden", !(s.emergency_stopped || s.trading_paused));
     fillSettings(s.constraints);

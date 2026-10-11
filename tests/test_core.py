@@ -1862,3 +1862,56 @@ class TestDemoWallet:
         assert cc.paper_trading is False and cc.live_execution_mode == "demo"
         c.post("/api/demo-wallet/clear")
         assert c.get("/api/demo-wallet").json()["rows"] == []
+
+
+class TestModeAwarePortfolio:
+    def test_paper_mode_shows_paper_portfolio(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        s = c.get("/api/state").json()
+        assert s["mode"] == "paper"
+        assert "portfolio" in s and s["wallet_view"] is None
+
+    def test_demo_mode_shows_demo_wallet(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        db.demo_set("arc", "USDC", 15.0, is_gas=True)
+        c = TestClient(srv.app)
+        c.post("/api/go-demo")
+        s = c.get("/api/state").json()
+        assert s["mode"] == "demo"
+        w = s["wallet_view"]
+        assert w is not None
+        assert w["chains"]["arc"][0]["symbol"] == "USDC"
+        assert w["total_usd"] == pytest.approx(15.0)
+        c.post("/api/go-paper")
+
+    def test_real_mode_shows_real_wallet_view(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses", lambda c: {})
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                           lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 1.0, "tokens": []}}},
+            "solana": None})
+        from memicoin_core.settings import load_constraints
+        cc = load_constraints(db)
+        cc.paper_trading = False
+        cc.live_execution_mode = "onchain"
+        db.set_setting("constraints", cc.to_json())
+        s = c2 = TestClient(srv.app).get("/api/state").json()
+        assert s["mode"] == "real"
+        assert s["wallet_view"] is not None
+        assert s["wallet_view"]["chains"]["base"][0]["symbol"] == "ETH"
+        # restore paper for other tests
+        cc.paper_trading = True
+        db.set_setting("constraints", cc.to_json())
