@@ -57,10 +57,11 @@ def resolve_action_amount(action: dict, prices: dict[str, float],
 
 
 class ConstraintValidator:
-    def __init__(self, db, constraints: Constraints):
+    def __init__(self, db, constraints: Constraints, solana_key_present: bool = False):
         self.db = db
         self.constraints = constraints
         self.tracker = PortfolioTracker(db)
+        self._solana_key = solana_key_present
 
     def check_stop_conditions(self, prices: dict[str, float]) -> ValidationResult:
         c = self.constraints
@@ -144,6 +145,14 @@ class ConstraintValidator:
         if info is None:
             return ValidationResult(False, f"Asset {asset!r} not found in market data.")
         chain = info.get("chain") or info.get("platform") or ""
+        # Solana requires an imported Solana key: without one the app cannot
+        # sign there, so Solana assets are rejected regardless of settings.
+        if chain.lower() == "solana" and not self.has_solana_key():
+            return ValidationResult(
+                False,
+                "Solana asset rejected: no Solana wallet key imported "
+                "(import one in Settings, or remove solana from allowed chains).",
+            )
         if c.autonomy_mode == "constrained":
             allowed = [a.lower() for a in c.allowed_chains]
             if chain and chain.lower() not in allowed:
@@ -152,6 +161,11 @@ class ConstraintValidator:
                     f"Chain {chain!r} for {asset} is not in allowed chains {allowed}.",
                 )
         return ValidationResult(True, "")
+
+    def has_solana_key(self) -> bool:
+        if self._solana_key is None:
+            return False
+        return self._solana_key
 
     def _resolve_amount(self, action: dict, prices: dict[str, float]) -> float | None:
         """Single source of truth for how much an action means, in ABSOLUTE

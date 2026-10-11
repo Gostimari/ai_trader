@@ -22,11 +22,13 @@ MAX_ACTIONS_PER_CYCLE = 6
 
 
 class AIAction(BaseModel):
-    type: str = Field(pattern="^(buy|sell|swap)$")
-    asset: str
+    type: str = Field(pattern="^(buy|sell|swap|bridge)$")
+    asset: str = ""
     amount_or_percent: str | float
     reason: str
     asset_out: Optional[str] = None
+    from_chain: Optional[str] = None
+    to_chain: Optional[str] = None
 
     @field_validator("amount_or_percent")
     @classmethod
@@ -72,6 +74,16 @@ Rules:
 - Percent amounts are checked against portfolio value (buys) or holdings
   (sells) by the execution layer BEFORE execution. Anything over the
   user's max position size will be rejected; size proposals to fit.
+- CROSS-CHAIN FUNDING: USDC can be moved between EVM chains (ethereum,
+  arc, and other CCTP chains listed in your context) with a "bridge"
+  action: {"type": "bridge", "from_chain": "...", "to_chain": "...",
+  "amount_or_percent": "50%"}. Bridging takes minutes and the funds only
+  become investable on the NEXT cycle — so when the best opportunity is
+  on a chain where the wallet has no USDC, propose the bridge this cycle
+  and the investment in the following one. Never propose buying on a
+  chain with no funds there; bridge first.
+- SOLANA: only propose Solana assets when the context says a Solana key
+  is imported; otherwise Solana actions are rejected.
 - The execution layer will reject anything violating the user's constraints; do not propose violations.
 - Cash is held in USD (paper mode). To exit a position, sell it.
 """
@@ -88,7 +100,14 @@ class DecisionEngine:
         self.live_executor = live_executor
         self._onchain_secrets = onchain_secrets
         self.tracker = PortfolioTracker(db)
-        self.validator = ConstraintValidator(db, constraints)
+        solana_present = False
+        if onchain_secrets is not None:
+            try:
+                solana_present = onchain_secrets.has("onchain_solana_private_key")
+            except Exception:
+                pass
+        self.validator = ConstraintValidator(db, constraints,
+                                             solana_key_present=solana_present)
 
     # ---------- cycle ----------
     def run_cycle(self) -> dict:
@@ -141,6 +160,9 @@ class DecisionEngine:
         def try_actions(actions) -> None:
             for action in actions:
                 a = action.model_dump() if hasattr(action, "model_dump") else dict(action)
+                if a.get("type") == "bridge":
+                    self._execute_bridge(cycle_id, a)
+                    continue
                 result = self.validator.validate_action(a, prices, assets)
                 if not result.ok:
                     rejected.append(a)
@@ -253,6 +275,14 @@ class DecisionEngine:
         if c.custom_prompt.strip():
             parts.append(f"## User custom prompt (instructions the user wants you to follow)\n{c.custom_prompt.strip()}")
         parts.append(f"## Portfolio state\n{json.dumps(portfolio, indent=2)}")
+        solana_key = "yes" if (self._onchain_secrets is not None and
+                               self._onchain_secrets.has("onchain_solana_private_key")) else "NO"
+        from .bridge import CCTP_DOMAINS
+        parts.append(
+            "## Wallet capabilities\n"
+            f"- Solana key imported: {solana_key} "
+            f"({'Solana assets allowed' if solana_key == 'yes' else 'do NOT propose Solana assets'})\n"
+            f"- CCTP-bridgeable USDC chains: {', '.join(CCTP_DOMAINS)} (bridge action available)")
         market_rows = [
             {k: a.get(k) for k in ("asset", "name", "chain", "price_usd", "change_24h_pct",
                                    "change_7d_pct", "volume_24h_usd", "market_cap_usd")}
@@ -341,6 +371,42 @@ class DecisionEngine:
                 "tx_id": f"paper-{utcnow()}-{asset}-{dest}",
             })
         return None
+
+    def _execute_bridge(self, cycle_id: str, action: dict) -> None:
+        """CCTP USDC bridge: burn on src, auto-mint on dst (minutes later).
+        Logged as a decision with the follow-up explanation."""
+        from .bridge import bridge_supported, bridge_usdc
+        src = (action.get("from_chain") or "").strip().lower()
+        dst = (action.get("to_chain") or "").strip().lower()
+        amt_raw = action.get("amount_or_percent")
+        try:
+            amt = float(str(amt_raw).rstrip("%"))
+        except (TypeError, ValueError):
+            amt = 0.0
+        reason = action.get("reason", "")
+        if not src or not dst or amt <= 0:
+            self.db.add_decision({
+                "cycle_id": cycle_id, "action": "bridge", "status": "rejected",
+                "reason": f"Malformed bridge proposal: {src}->{dst} {amt_raw!r}. {reason}"})
+            return
+        if not self.constraints.paper_trading:
+            if self._onchain_secrets is None or not self._onchain_secrets.has("onchain_private_key"):
+                self.db.add_decision({
+                    "cycle_id": cycle_id, "action": "bridge", "status": "failed",
+                    "reason": "Bridge failed: no EVM wallet key imported"})
+                return
+            res = bridge_usdc(self._onchain_secrets, src, dst, amt)
+            self.db.add_decision({
+                "cycle_id": cycle_id, "action": "bridge", "asset_in": "USDC",
+                "asset_out": dst, "amount": amt, "status": "executed" if res.ok else "failed",
+                "reason": (f"Bridge {src}->{dst}: {res.steps}" if res.ok
+                           else f"Bridge {src}->{dst} failed: {res.error}. {reason}"),
+                "tx_id": res.tx_id})
+        else:
+            self.db.add_decision({
+                "cycle_id": cycle_id, "action": "bridge", "asset_in": "USDC",
+                "asset_out": dst, "amount": amt, "status": "executed",
+                "reason": f"[PAPER] Bridge {src}->{dst} of {amt} USDC simulated. {reason}"})
 
     def _execute_live(self, cycle_id: str, action: dict, asset: str, amount: float) -> str | None:
         if self.constraints.live_execution_mode == "onchain":

@@ -1490,3 +1490,107 @@ class TestStablecoinDecoyProtection:
         row = d["chains"]["base"][0]
         assert row["value_usd"] == pytest.approx(10.0)  # peg floor, not a decoy
         assert "USDC" not in searches  # no symbol-search for stables
+
+
+class TestSolanaGating:
+    def _sol_assets(self):
+        return {"BONK": {"asset": "BONK", "chain": "solana"},
+                "DOGE": {"asset": "DOGE", "chain": "dogecoin"}}
+
+    def test_solana_rejected_without_key(self, db):
+        c = Constraints(allowed_chains=["solana", "ethereum"])  # solana allowed by user
+        v = ConstraintValidator(db, c, solana_key_present=False)
+        r = v.validate_action({"type": "buy", "asset": "BONK",
+                               "amount_or_percent": 10}, PRICES, self._sol_assets())
+        assert not r.ok and "no Solana wallet key" in r.reason
+
+    def test_solana_allowed_with_key(self, db):
+        prices = dict(PRICES, BONK=0.00003)
+        c = Constraints(allowed_chains=["solana"])
+        v = ConstraintValidator(db, c, solana_key_present=True)
+        r = v.validate_action({"type": "buy", "asset": "BONK",
+                               "amount_or_percent": 10}, prices, self._sol_assets())
+        assert r.ok, r.reason
+
+    def test_other_chains_unaffected_by_key_absence(self, db):
+        db.upsert_position("DOGE", "dogecoin", 100, 10)
+        c = Constraints(allowed_chains=["dogecoin"])
+        v = ConstraintValidator(db, c, solana_key_present=False)
+        r = v.validate_action({"type": "sell", "asset": "DOGE",
+                               "amount_or_percent": 10}, PRICES, self._sol_assets())
+        assert r.ok, r.reason
+
+
+class TestBridgeAction:
+    def test_bridge_paper_mode_logged(self, db, monkeypatch):
+        db.set_cash(100.0)
+        c = Constraints(paper_trading=True)
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        ai_out = json.dumps({
+            "analysis_summary": "bridge to arc for tomorrow's opportunity",
+            "actions": [{"type": "bridge", "from_chain": "ethereum",
+                         "to_chain": "arc", "amount_or_percent": 50,
+                         "reason": "best token is on arc"}],
+            "confidence": "medium"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        assert result["status"] == "completed"
+        d = db.list_decisions()[0]
+        assert d["action"] == "bridge" and d["status"] == "executed"
+        assert "[PAPER]" in d["reason"] and "ethereum" in d["reason"]
+
+    def test_malformed_bridge_rejected(self, db, monkeypatch):
+        # valid amount but missing source chain: passes the AI schema,
+        # must be rejected by the engine's bridge validation
+        db.set_cash(100.0)
+        c = Constraints(paper_trading=True)
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        ai_out = json.dumps({
+            "analysis_summary": "bridge",
+            "actions": [{"type": "bridge", "to_chain": "arc",
+                         "amount_or_percent": 50, "reason": "bad"}],
+            "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        engine.run_cycle()
+        d = db.list_decisions()[0]
+        assert d["action"] == "bridge"
+        assert d["status"] == "rejected" and "Malformed" in d["reason"]
+
+    def test_garbage_bridge_amount_rejected_by_schema(self, db, monkeypatch):
+        # unparseable amount -> whole AI response invalid, nothing executes
+        db.set_cash(100.0)
+        c = Constraints(paper_trading=True)
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        ai_out = json.dumps({
+            "analysis_summary": "bridge",
+            "actions": [{"type": "bridge", "from_chain": "ethereum",
+                         "to_chain": "arc", "amount_or_percent": "garbage",
+                         "reason": "bad"}],
+            "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        assert result["status"] == "invalid"  # schema safety net
+        assert db.get_cash() == pytest.approx(100.0)
+
+    def test_bridge_unverified_pair_refused_honestly(self, db, monkeypatch):
+        from memicoin_core.bridge import bridge_usdc
+        class _Store:
+            def has(self, k): return k == "onchain_private_key"
+            def get(self, k): return "0x" + "1" * 64
+        res = bridge_usdc(_Store(), "base", "arc", 5.0)
+        assert not res.ok and "not enabled" in res.error
+
+    def test_wallet_capabilities_in_prompt(self, db, monkeypatch):
+        db.set_cash(100.0)
+        c = Constraints(paper_trading=True)
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        captured = {}
+        def fake_call(prompt):
+            captured["p"] = prompt
+            return json.dumps({"analysis_summary": "h", "actions": [],
+                              "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", fake_call)
+        engine.run_cycle()
+        assert "Solana key imported: NO" in captured["p"]
+        assert "do NOT propose Solana assets" in captured["p"]
+        assert "bridge action available" in captured["p"]
