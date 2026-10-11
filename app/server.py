@@ -205,49 +205,98 @@ def wallet_balances():
     except MarketDataError:
         pass
 
+    # Fallback discovery: tokens whose balance we know but whose contract
+    # produced no price (e.g. Arc, which the Etherscan V2 API may not
+    # index). Resolve the SYMBOL via DexScreener search on the token's own
+    # chain, take that contract's price. Bounded: one search per unpriced
+    # symbol, results cached by the market module.
+    def _resolve_symbol_price(symbol: str, chain: str) -> float:
+        try:
+            pairs = market._ds_search(symbol)
+        except Exception:
+            return 0.0
+        best_price, best_liq = 0.0, -1.0
+        for p in pairs:
+            if (p.get("chainId") or "") != chain:
+                continue
+            base = p.get("baseToken") or {}
+            if (base.get("symbol") or "").upper() != symbol.upper():
+                continue
+            liq = float((p.get("liquidity") or {}).get("usd") or 0.0)
+            price = float(p.get("priceUsd") or 0.0)
+            if price > 0 and liq > best_liq:
+                best_price, best_liq = price, liq
+        return best_price
+
     native_prices = {"ethereum": "ETH", "base": "ETH", "polygon": "POL",
                      "binance-smart-chain": "BNB", "arc": "USDC", "solana": "SOL"}
     # native coins we can price via watchlist lookups (symbols in market data)
     chains: dict = {}
     total = 0.0
 
-    def value_of(symbol: str, balance: float, contract: str = "") -> float:
+    def value_of(symbol: str, balance: float, contract: str = "",
+                chain: str = "") -> float:
         p = prices.get(symbol.upper(), 0.0)
         if p <= 0 and contract:
             p = addr_prices.get(contract.lower(), 0.0)
-        # stablecoin peg floor: USDC/USDT/EURC are ~$1 by definition; on Arc
+        if p <= 0 and symbol and chain:
+            p = _symbol_fallback.get((symbol.upper(), chain), 0.0)
+        # stablecoin peg floor: USDC/USDT are ~$1 by definition; on Arc
         # USDC is native with no wrapped contract, so market data can miss it
         if p <= 0 and symbol.upper() in ("USDC", "USDT"):
             p = 1.0
         return balance * p
+
+    # pre-resolve unpriced symbols once (bounded searches, memoized)
+    _symbol_fallback: dict = {}
+
+    def _price_unpriced(rows_by_chain: dict) -> None:
+        for chain, rows in rows_by_chain.items():
+            for r in rows:
+                key = (r.get("symbol", "").upper(), chain)
+                if key in _symbol_fallback or not r.get("symbol"):
+                    continue
+                if r.get("value_usd", 0) > 0 or r.get("kind") == "native":
+                    continue
+                _symbol_fallback[key] = _resolve_symbol_price(r["symbol"], chain)
 
     evm = raw.get("evm")
     if evm:
         for chain, entry in (evm.get("chains") or {}).items():
             sym = entry.get("native_symbol", native_prices.get(chain, "ETH"))
             wrapped = NATIVE_WRAPPED.get(chain, "")
-            native_usd = value_of(
-                sym if sym in prices else native_prices.get(chain, ""),
-                entry.get("native", 0.0), wrapped)
             rows = []
             if entry.get("native", 0) > 0:
-                rows.append({"symbol": sym, "balance": entry["native"], "value_usd": native_usd,
-                             "chain": chain, "kind": "native"})
+                rows.append({"symbol": sym, "balance": entry["native"], "value_usd": 0.0,
+                             "chain": chain, "kind": "native", "contract": wrapped})
             for t in entry.get("tokens", []):
-                v = value_of(t["symbol"], t["balance"], t.get("contract", ""))
                 rows.append({"symbol": t["symbol"], "balance": t["balance"],
-                             "value_usd": v, "chain": chain, "kind": "token",
-                             "contract": t["contract"]})
+                             "value_usd": 0.0, "chain": chain, "kind": "token",
+                             "contract": t.get("contract", "")})
             chains[chain] = rows
-            total += sum(r["value_usd"] for r in rows)
+        # native rows also get zeroed first for uniform final valuation
+        for chain_rows in chains.values():
+            for r in chain_rows:
+                r["value_usd"] = 0.0
+        # resolve unpriced symbols via DexScreener search (bounded, memoized)
+        _price_unpriced(chains)
+        # final valuation pass: symbol -> contract -> symbol-search -> peg
+        for chain, chain_rows in chains.items():
+            for r in chain_rows:
+                r["value_usd"] = value_of(r["symbol"], r["balance"],
+                                          r.get("contract", ""), chain)
+        total += sum(r["value_usd"] for rows in chains.values() for r in rows)
     sol = raw.get("solana")
     if sol:
         rows = []
         if sol.get("native", 0) > 0:
-            v = value_of("SOL", sol["native"], NATIVE_WRAPPED["solana"])
-            rows.append({"symbol": "SOL", "balance": sol["native"], "value_usd": v,
-                         "chain": "solana", "kind": "native"})
-            total += v
+            rows.append({"symbol": "SOL", "balance": sol["native"], "value_usd": 0.0,
+                         "chain": "solana", "kind": "native",
+                         "contract": NATIVE_WRAPPED["solana"]})
+        for t in sol.get("tokens", []):
+            rows.append({"symbol": t.get("symbol", "?"), "balance": t.get("balance", 0.0),
+                         "value_usd": 0.0, "chain": "solana", "kind": "token",
+                         "contract": t.get("contract", t.get("address", ""))})
         chains["solana"] = rows
     return {"configured": True, "evm_address": (evm or {}).get("address"),
             "solana_address": (sol or {}).get("address"),

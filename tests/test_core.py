@@ -1429,3 +1429,35 @@ class TestNativeAndStablecoinValuation:
         from memicoin_core.onchain import EVM_TOKENS
         usdc = [t for t in EVM_TOKENS.get("base", []) if t[0] == "USDC"]
         assert usdc and usdc[0][1] == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+
+class TestSymbolFallbackPricing:
+    def test_unpriced_symbol_resolved_via_search(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses", lambda contracts: {})
+        def fake_search(q, **kw):
+            return [
+                {"chainId": "arc", "baseToken": {"symbol": "ARGUS", "address": "0x1"},
+                 "priceUsd": "0.0115", "liquidity": {"usd": 500000}},
+                {"chainId": "solana", "baseToken": {"symbol": "ARGUS", "address": "0x2"},
+                 "priceUsd": "0.99", "liquidity": {"usd": 9000000}},  # wrong chain
+            ]
+        monkeypatch.setattr(srv.market, "_ds_search", fake_search)
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                           lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "arc": {"native_symbol": "USDC", "native": 0,
+                        "tokens": [{"symbol": "ARGUS", "contract": "0xunk",
+                                    "balance": 100.0}]}}
+            }, "solana": None})
+        c = TestClient(srv.app)
+        d = c.get("/api/wallet/balances").json()
+        row = d["chains"]["arc"][0]
+        assert row["symbol"] == "ARGUS"
+        assert row["value_usd"] == pytest.approx(1.15)  # 100 * $0.0115, arc pair only
