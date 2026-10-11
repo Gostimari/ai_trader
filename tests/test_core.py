@@ -646,7 +646,7 @@ class TestWatchlist:
                                  "volume": {"h24": 100}, "priceChange": {"h24": 2, "h7": 3},
                                  "liquidity": {"usd": 50}}]}
                     return _R()
-                if "/tokens/v1/dexscreener/" in url:
+                if "/latest/dex/tokens/" in url:
                     token_pair_calls.append(url)
                     class _R2:
                         status_code = 200
@@ -664,7 +664,10 @@ class TestWatchlist:
                     def json(self): return {}
                 return _R3()
 
-        monkeypatch.setattr(market_mod, "requests", _FakeReq)
+        class _FakeReqWithExc(_FakeReq):
+            class RequestException(Exception):
+                pass
+        monkeypatch.setattr(market_mod, "requests", _FakeReqWithExc)
         db.set_setting("extra_asset_ids",
                        ["0x171a4217b86a807a64eb94757db6849fb4bdbaa0"])
         m = market_mod.MarketDataModule(db)
@@ -1333,3 +1336,49 @@ class TestTokenDiscovery:
         found = [t for rows in d["chains"].values() for t in rows
                  if t.get("symbol") == "ARCAT"]
         assert found and found[0]["balance"] == 77.0
+
+
+class TestAddressPricing:
+    def test_prices_for_addresses_from_pairs(self, db, monkeypatch):
+        import memicoin_core.market as market_mod
+        m = market_mod.MarketDataModule(db)
+        class _FakeReq:
+            @staticmethod
+            def get(url, params=None, timeout=None, headers=None):
+                assert "/latest/dex/tokens/" in url
+                class _R:
+                    status_code = 200
+                    def raise_for_status(self): pass
+                    def json(self):
+                        return {"pairs": [
+                            {"baseToken": {"address": "0xAAA", "symbol": "ARCAT"},
+                             "priceUsd": "0.42", "liquidity": {"usd": 1000}},
+                            {"baseToken": {"address": "0xAAA", "symbol": "ARCAT"},
+                             "priceUsd": "0.99", "liquidity": {"usd": 10}},
+                        ]}
+                return _R()
+        monkeypatch.setattr(market_mod, "requests", _FakeReq)
+        prices = m.get_prices_for_addresses(["0xaaa"])
+        assert prices == {"0xaaa": 0.42}  # deepest-liquidity pair wins
+
+    def test_wallet_rows_valued_via_contract(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses",
+                            lambda contracts: {"0x" + "c" * 40: 2.5})
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                           lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "arc": {"native_symbol": "USDC", "native": 0,
+                        "tokens": [{"symbol": "ARGUS", "contract": "0x" + "c" * 40,
+                                    "balance": 10.0}]}}
+            }, "solana": None})
+        c = TestClient(srv.app)
+        d = c.get("/api/wallet/balances").json()
+        row = d["chains"]["arc"][0]
+        assert row["symbol"] == "ARGUS" and row["value_usd"] == pytest.approx(25.0)

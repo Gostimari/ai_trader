@@ -166,14 +166,38 @@ def wallet_balances():
     except MarketDataError:
         prices, asset_map = {}, {}
 
+    # batch-price every contract the wallet holds so discovered tokens get
+    # real USD values: contracts come from the RAW balance data (rows are
+    # built below), priced via DexScreener in batches of 30
+    all_contracts = []
+    evm_raw = (raw.get("evm") or {}).get("chains") or {}
+    for entry in evm_raw.values():
+        for t in entry.get("tokens", []):
+            c = t.get("contract") or ""
+            if c and len(c) >= 32:
+                all_contracts.append(c)
+    sol_raw = raw.get("solana") or {}
+    for t in sol_raw.get("tokens", []):
+        c = t.get("contract") or t.get("address") or ""
+        if c and len(c) >= 32:
+            all_contracts.append(c)
+    addr_prices: dict = {}
+    try:
+        if all_contracts:
+            addr_prices = market.get_prices_for_addresses(all_contracts)
+    except MarketDataError:
+        pass
+
     native_prices = {"ethereum": "ETH", "base": "ETH", "polygon": "POL",
                      "binance-smart-chain": "BNB", "arc": "USDC", "solana": "SOL"}
     # native coins we can price via watchlist lookups (symbols in market data)
     chains: dict = {}
     total = 0.0
 
-    def value_of(symbol: str, balance: float) -> float:
+    def value_of(symbol: str, balance: float, contract: str = "") -> float:
         p = prices.get(symbol.upper(), 0.0)
+        if p <= 0 and contract:
+            p = addr_prices.get(contract.lower(), 0.0)
         return balance * p
 
     evm = raw.get("evm")
@@ -186,7 +210,7 @@ def wallet_balances():
                 rows.append({"symbol": sym, "balance": entry["native"], "value_usd": native_usd,
                              "chain": chain, "kind": "native"})
             for t in entry.get("tokens", []):
-                v = value_of(t["symbol"], t["balance"])
+                v = value_of(t["symbol"], t["balance"], t.get("contract", ""))
                 rows.append({"symbol": t["symbol"], "balance": t["balance"],
                              "value_usd": v, "chain": chain, "kind": "token",
                              "contract": t["contract"]})

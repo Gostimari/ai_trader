@@ -93,6 +93,30 @@ class MarketDataModule:
     def get_prices(self, force: bool = False) -> dict[str, float]:
         return {a["asset"]: a["price_usd"] for a in self.get_market_overview(force)}
 
+    def get_prices_for_addresses(self, contracts: list[str]) -> dict[str, float]:
+        """Price arbitrary token contracts via DexScreener token-pairs
+        (batches of 30). Returns {contract_address_lower: price_usd}.
+        Used to value wallet holdings the AI universe doesn't cover."""
+        out: dict[str, float] = {}
+        contracts = [c for c in contracts if c and c.strip()]
+        for i in range(0, len(contracts), 30):
+            batch = contracts[i:i + 30]
+            try:
+                pairs = self._ds_token_pairs(batch)
+            except requests.RequestException:
+                continue
+            for p in pairs:
+                base = p.get("baseToken") or {}
+                addr = (base.get("address") or "").lower()
+                price = float(p.get("priceUsd") or 0.0)
+                if addr and price > 0:
+                    # keep the deepest-liquidity pair's price per contract
+                    liq = float((p.get("liquidity") or {}).get("usd") or 0.0)
+                    if addr not in out or liq > out.get(addr + "_liq", -1):
+                        out[addr] = price
+                        out[addr + "_liq"] = liq
+        return {k: v for k, v in out.items() if not k.endswith("_liq")}
+
     def get_asset_map(self, force: bool = False) -> dict[str, dict]:
         return {a["asset"]: a for a in self.get_market_overview(force)}
 
@@ -152,10 +176,15 @@ class MarketDataModule:
         return (resp.json() or {}).get("pairs") or []
 
     def _ds_token_pairs(self, addresses: list[str]) -> list[dict]:
-        url = "https://api.dexscreener.com/tokens/v1/dexscreener/" + ",".join(addresses)
+        """Token pairs by contract address. The /tokens/v1/ endpoint returns
+        empty for many indexed tokens (verified live); /latest/dex/tokens/
+        is the reliable variant and also accepts comma-separated batches."""
+        url = "https://api.dexscreener.com/latest/dex/tokens/" + ",".join(addresses)
         resp = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()
         data = resp.json()
+        if isinstance(data, dict):
+            return data.get("pairs") or []
         return data if isinstance(data, list) else []
 
     # DexScreener uses pseudo-chain ids for its own venues ("robinhood") and
