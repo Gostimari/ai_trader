@@ -89,6 +89,10 @@ Rules:
   chain with no funds there; bridge first.
 - SOLANA: only propose Solana assets when the context says a Solana key
   is imported; otherwise Solana actions are rejected.
+- TOKEN IDENTIFIERS: each asset in the market data includes its "contract"
+  address. For buy/sell/swap actions ALWAYS set "asset" to the token's
+  contract address from the market data (the execution layer requires
+  it; trades by bare symbol are rejected).
 - The execution layer will reject anything violating the user's constraints; do not propose violations.
 - Cash is held in USD (paper mode). To exit a position, sell it.
 """
@@ -393,8 +397,13 @@ class DecisionEngine:
             except Exception:
                 pass
         market_rows = [
-            {k: a.get(k) for k in ("asset", "name", "chain", "price_usd", "change_24h_pct",
-                                   "change_7d_pct", "volume_24h_usd", "market_cap_usd")}
+            {**{k: a.get(k) for k in ("asset", "name", "chain", "price_usd",
+                                      "change_24h_pct", "change_7d_pct",
+                                      "volume_24h_usd", "market_cap_usd")},
+             # the contract is REQUIRED for demo/on-chain execution: the AI
+             # must reference tokens by contract to trade them
+             "contract": a.get("contract", ""),
+             "liquidity_usd": a.get("liquidity_usd", 0)}
             for a in assets.values()
         ]
         parts.append(f"## Market data (meme coins)\n{json.dumps(market_rows, indent=2)}")

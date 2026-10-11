@@ -2178,3 +2178,30 @@ class TestEmptyActionsChallenge:
         assert result["status"] == "completed"
         assert result["executed"] == []  # original hold stands
         assert db.get_cash() == pytest.approx(100.0)
+
+
+class TestContractsInContext:
+    def test_market_rows_include_contract(self):
+        from memicoin_core.ai_engine import BASE_INSTRUCTIONS
+        assert "TOKEN IDENTIFIERS" in BASE_INSTRUCTIONS
+        assert "contract address" in BASE_INSTRUCTIONS
+
+    def test_context_passes_contract_through(self, db, monkeypatch):
+        db.set_cash(100.0)
+        c = Constraints(paper_trading=True)
+        BRETT_C = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+        class FM2(_FakeMarket):
+            def get_asset_map(self, force=False):
+                return {"BRETT": {"asset": "BRETT", "chain": "base",
+                                  "price_usd": 0.006, "contract": BRETT_C}}
+            def get_market_overview(self, force=False):
+                return [{"asset": "BRETT", "chain": "base", "price_usd": 0.006,
+                         "contract": BRETT_C, "name": "Brett"}]
+        engine = DecisionEngine(db, c, FM2(), None)
+        captured = []
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: captured.append(p) or json.dumps(
+                                {"analysis_summary": "h", "actions": [],
+                                 "confidence": "low"}))
+        engine.run_cycle()
+        assert BRETT_C in captured[0]  # the AI can see and use it
