@@ -237,7 +237,8 @@ class TestEngineCycle:
         captured = {}
 
         def fake_call(prompt):
-            captured["prompt"] = prompt
+            if "prompt" not in captured:
+                captured["prompt"] = prompt  # first call has the full context
             return json.dumps({"analysis_summary": "hold", "actions": [], "confidence": "low"})
 
         monkeypatch.setattr(engine, "_call_mistral", fake_call)
@@ -1584,16 +1585,17 @@ class TestBridgeAction:
         db.set_cash(100.0)
         c = Constraints(paper_trading=True)
         engine = DecisionEngine(db, c, _FakeMarket())
-        captured = {}
+        captured = []
         def fake_call(prompt):
-            captured["p"] = prompt
+            captured.append(prompt)
             return json.dumps({"analysis_summary": "h", "actions": [],
                               "confidence": "low"})
         monkeypatch.setattr(engine, "_call_mistral", fake_call)
         engine.run_cycle()
-        assert "Solana key imported: NO" in captured["p"]
-        assert "do NOT propose Solana assets" in captured["p"]
-        assert "bridge action available" in captured["p"]
+        p0 = captured[0]
+        assert "Solana key imported: NO" in p0
+        assert "do NOT propose Solana assets" in p0
+        assert "bridge action available" in p0
 
 
 class TestGasFeasibility:
@@ -2031,14 +2033,14 @@ class TestDemoCycleIntegration:
         db.demo_set("base", "ETH", 0.02, is_gas=True)
         db.demo_set("arc", "USDC", 50.0, is_gas=True)
         engine = self._demo_engine(db)
-        captured = {}
+        captured = []
         def fake_call(prompt):
-            captured["p"] = prompt
+            captured.append(prompt)
             return json.dumps({"analysis_summary": "h", "actions": [],
                               "confidence": "low"})
         monkeypatch.setattr(engine, "_call_mistral", fake_call)
         engine.run_cycle()
-        p = captured["p"]
+        p = captured[0]  # first call carries the full context
         assert "DEMO wallet" in p
         assert "USDC" in p and "arc" in p
         assert "investable gas" in p
@@ -2104,3 +2106,75 @@ class TestDemoCycleIntegration:
         assert err is not None
         assert "insufficient funds" in err or "gas" in err
         db.demo_clear()
+
+
+class TestEmptyActionsChallenge:
+    def test_hold_with_funds_gets_challenged_and_acts(self, db, monkeypatch):
+        db.set_cash(100.0)
+        c = Constraints(paper_trading=True)
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        empty = json.dumps({"analysis_summary": "opportunities exist",
+                            "actions": [], "confidence": "high"})
+        committed = json.dumps({"analysis_summary": "buy DOGE",
+                               "actions": [{"type": "buy", "asset": "DOGE",
+                                            "amount_or_percent": "20%",
+                                            "reason": "momentum"}],
+                               "confidence": "high"})
+        calls = []
+        def fake_call(prompt):
+            calls.append(prompt)
+            return empty if len(calls) == 1 else committed
+        monkeypatch.setattr(engine, "_call_mistral", fake_call)
+        result = engine.run_cycle()
+        assert len(calls) == 2  # challenge fired
+        assert "ZERO actions" in calls[1]
+        assert len(result["executed"]) == 1
+        assert result["executed"][0]["asset"] == "DOGE"
+
+    def test_hold_with_no_investable_funds_not_challenged(self, db, monkeypatch):
+        # all capital in a position, no free cash: nothing to invest with
+        db.set_cash(0.0)
+        db.set_setting("constraints", Constraints(max_loss_pct=100).to_json())
+        db.upsert_position("DOGE", "dogecoin", 1000, 100)  # all funds invested
+        from memicoin_core.settings import load_constraints
+        c = load_constraints(db)
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        calls = []
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: calls.append(p) or json.dumps(
+                                {"analysis_summary": "h", "actions": [],
+                                 "confidence": "low"}))
+        result = engine.run_cycle()
+        assert len(calls) == 1  # no challenge: no free funds to invest
+        assert result["executed"] == []
+
+    def test_demo_hold_with_demo_funds_challenged(self, db, monkeypatch):
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        empty = json.dumps({"analysis_summary": "x", "actions": [],
+                            "confidence": "low"})
+        calls = []
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: calls.append(p) or empty)
+        engine.run_cycle()
+        assert len(calls) == 2  # demo funds exist -> challenge fired
+        db.demo_clear()
+
+    def test_challenge_failure_keeps_original_hold(self, db, monkeypatch):
+        db.set_cash(100.0)
+        c = Constraints(paper_trading=True)
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        calls = []
+        def fake_call(prompt):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return json.dumps({"analysis_summary": "h", "actions": [],
+                                   "confidence": "low"})
+            return "garbage not json"  # challenge response invalid
+        monkeypatch.setattr(engine, "_call_mistral", fake_call)
+        result = engine.run_cycle()
+        assert len(calls) == 2
+        assert result["status"] == "completed"
+        assert result["executed"] == []  # original hold stands
+        assert db.get_cash() == pytest.approx(100.0)

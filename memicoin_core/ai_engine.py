@@ -66,6 +66,12 @@ Rules:
 - Use tickers exactly as they appear in the market data provided.
 - amount_or_percent: prefer an absolute quantity of the asset; you may use "N%" meaning N% of current portfolio value for buys, or N% of current holdings for sells.
 - "hold" requires no action: return an empty actions array.
+- CONSISTENCY: if your analysis_summary says the portfolio "needs rebalancing"
+  or identifies opportunities, you MUST propose actions that follow through.
+  An empty actions array is only acceptable when you genuinely recommend
+  caution - and then your summary must say so explicitly ("recommend holding
+  because..."), not describe opportunities you then ignore. If investable
+  funds exist and momentum is favorable, propose the trades.
 - DIVERSIFY: when buying, prefer proposing MULTIPLE buys across different
   coins (each within the max position size) instead of one large buy.
   A good cycle builds or adjusts several positions at once — e.g. 2-4
@@ -185,6 +191,55 @@ class DecisionEngine:
                     })
                     continue
                 executed.append(a)
+
+        # Empty-actions challenge: the AI proposed nothing. If investable
+        # funds exist, push back ONCE - models sometimes describe a plan in
+        # the summary but forget to commit it to actions.
+        if not decision.actions:
+            has_funds = False
+            try:
+                summary = self.tracker.summary(prices)
+                if summary.get("cash_usd", 0) > 1:
+                    has_funds = True
+            except Exception:
+                pass
+            if (not self.constraints.paper_trading
+                    and self.constraints.live_execution_mode == "demo"):
+                from .demowallet import DemoWallet
+                demo = DemoWallet(self.db)
+                for row in demo.rows():
+                    if row["is_gas"]:
+                        continue
+                    if row["balance"] > 0:
+                        has_funds = True
+                        break
+                # gas itself is spendable (investable portion)
+                for ch in {r["chain"] for r in demo.rows()}:
+                    if demo.investable_gas(ch) > 0:
+                        has_funds = True
+                        break
+            if has_funds:
+                challenge = (
+                    "Your previous response proposed ZERO actions, but your own "
+                    "analysis identified opportunities and the portfolio has "
+                    "investable funds. Re-decide: either propose SPECIFIC actions "
+                    "(buy/sell/swap/bridge with amounts) that act on your "
+                    "analysis, or explicitly justify holding with concrete risk "
+                    "reasons. Same JSON schema as before.")
+                try:
+                    raw2 = self._call_mistral(challenge)
+                    decision2 = self._parse(raw2)
+                    if decision2.actions:
+                        decision = decision2  # adopt the committed decision
+                        self.db.add_decision({
+                            "cycle_id": cycle_id, "action": "hold",
+                            "status": "replaced",
+                            "reason": "AI initially proposed no actions; "
+                                      "challenged once and it committed to "
+                                      f"{len(decision2.actions)} action(s).",
+                        })
+                except Exception:
+                    pass  # challenge is best-effort; original hold stands
 
         try_actions(decision.actions)
 
