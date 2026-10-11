@@ -109,16 +109,25 @@ class DemoWallet:
         return {"arc": "USDC", "solana": "SOL"}.get(chain, "ETH")
 
     def bridge(self, src_chain: str, dst_chain: str, asset: str, amount: float) -> tuple[bool, str]:
-        """Simulated CCTP bridge: deduct on src (with gas), credit on dst
-        after the reserve on the destination is respected."""
+        """Simulated CCTP bridge: deduct on src (with gas), credit on dst.
+        All-or-nothing: checks the FULL requirement (amount + gas, which on
+        chains like Arc are the same token) before touching any balance."""
         ok, why = self.gas_ok(src_chain)
         if not ok:
             return False, why
         have = self.balance(src_chain, asset)
-        if have + 1e-12 < amount:
-            return False, f"insufficient {asset} on {src_chain}"
         gas_cost = self.per_tx_gas(src_chain)
-        self.db.demo_adjust(src_chain, self._gas_symbol(src_chain), -gas_cost, is_gas=True)
+        gas_sym = self._gas_symbol(src_chain)
+        # total requirement: the bridged amount plus gas; when the asset IS
+        # the gas token (USDC on arc), they come from the same balance
+        if gas_sym == asset:
+            if have + 1e-12 < amount + gas_cost:
+                return False, (f"insufficient {asset} on {src_chain}: have {have:.4f}, "
+                               f"need {amount + gas_cost:.4f} (bridge + gas)")
+        elif have + 1e-12 < amount:
+            return False, f"insufficient {asset} on {src_chain}"
+        # all checks passed: deduct gas, then the amount, then credit
+        self.db.demo_adjust(src_chain, gas_sym, -gas_cost, is_gas=True)
         self.db.demo_adjust(src_chain, asset, -amount)
         self.db.demo_adjust(dst_chain, asset, amount)
         return True, (f"bridged {amount} {asset} {src_chain}->{dst_chain}; "

@@ -177,7 +177,15 @@ class DecisionEngine:
             for action in actions:
                 a = action.model_dump() if hasattr(action, "model_dump") else dict(action)
                 if a.get("type") == "bridge":
+                    before = len(executed)
                     self._execute_bridge(cycle_id, a)
+                    # count it: executed if a decision row says executed
+                    rows = self.db.list_decisions(limit=3)
+                    if any(d.get("action") == "bridge" and d["status"] == "executed"
+                           and d.get("cycle_id") == cycle_id for d in rows):
+                        executed.append(a)
+                    else:
+                        failed.append(a)
                     continue
                 # annotate the token's chain so the percent resolver can
                 # pick the right demo funds
@@ -563,7 +571,21 @@ class DecisionEngine:
                 "cycle_id": cycle_id, "action": "bridge", "status": "rejected",
                 "reason": f"Malformed bridge proposal: {src}->{dst} {amt_raw!r}. {reason}"})
             return
-        if not self.constraints.paper_trading:
+        if getattr(self.db, "demo_mode_percent", False):
+            # demo mode: settle against the demo wallet (gas deducted on src)
+            from .demowallet import DemoWallet
+            demo = DemoWallet(self.db)
+            ok, msg = demo.bridge(src, dst, "USDC", amt)
+            self.db.add_decision({
+                "cycle_id": cycle_id, "action": "bridge", "asset_in": "USDC",
+                "asset_out": dst, "amount": amt,
+                "status": "executed" if ok else "failed",
+                "reason": (f"[DEMO] Bridge {src}->{dst} of {amt} USDC: {msg}. "
+                           f"Funds investable on {dst} next cycle. {reason}"
+                           if ok else f"[DEMO] Bridge {src}->{dst} failed: {msg}"),
+            })
+        elif not self.constraints.paper_trading:
+            # real mode: CCTP burn; mint lands after attestation
             if self._onchain_secrets is None or not self._onchain_secrets.has("onchain_private_key"):
                 self.db.add_decision({
                     "cycle_id": cycle_id, "action": "bridge", "status": "failed",

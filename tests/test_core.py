@@ -2331,3 +2331,45 @@ class TestTwoModeWorld:
         assert db.demo_get("base", "BRETT", BRETT_C)["balance"] == pytest.approx(0.0)
         db.demo_mode_percent = False
         db.demo_clear()
+
+
+class TestDemoBridge:
+    def test_demo_bridge_moves_usdc_without_real_key(self, db, monkeypatch):
+        # the user's exact scenario: USDC on arc, no EVM key imported
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)  # NO onchain_secrets
+        ai_out = json.dumps({
+            "analysis_summary": "bridge to base",
+            "actions": [{"type": "bridge", "from_chain": "arc",
+                         "to_chain": "base", "amount_or_percent": 40,
+                         "reason": "BRETT momentum on base"}],
+            "confidence": "high"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        assert result["status"] == "completed"
+        assert len(result["executed"]) == 1  # bridge counted as executed
+        assert result["executed"][0]["type"] == "bridge"
+        # demo balances moved: arc USDC -40 - 0.005 gas, base USDC +40
+        assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(50.0 - 40.0 - 0.005)
+        assert db.demo_get("base", "USDC")["balance"] == pytest.approx(40.0)
+        d = db.list_decisions()[0]
+        assert d["status"] == "executed" and "[DEMO]" in d["reason"]
+        db.demo_clear()
+
+    def test_demo_bridge_insufficient_funds_fails_honestly(self, db, monkeypatch):
+        db.demo_set("arc", "USDC", 10.0, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        ai_out = json.dumps({
+            "analysis_summary": "bridge",
+            "actions": [{"type": "bridge", "from_chain": "arc",
+                         "to_chain": "base", "amount_or_percent": 50,
+                         "reason": "r"}],
+            "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        assert len(result["executed"]) == 0
+        d = db.list_decisions()[0]
+        assert d["status"] == "failed" and "insufficient" in d["reason"]
+        db.demo_clear()
