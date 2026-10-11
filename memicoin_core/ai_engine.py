@@ -561,15 +561,38 @@ class DecisionEngine:
         src = (action.get("from_chain") or "").strip().lower()
         dst = (action.get("to_chain") or "").strip().lower()
         amt_raw = action.get("amount_or_percent")
-        try:
-            amt = float(str(amt_raw).rstrip("%"))
-        except (TypeError, ValueError):
-            amt = 0.0
         reason = action.get("reason", "")
-        if not src or not dst or amt <= 0:
+
+        # resolve the amount against the SOURCE chain's USDC balance
+        # (percentages of the whole portfolio make no sense for a bridge:
+        # only what sits on src can move)
+        is_pct = isinstance(amt_raw, str) and amt_raw.strip().endswith("%")
+        try:
+            val = float(str(amt_raw).rstrip("%"))
+        except (TypeError, ValueError):
+            val = 0.0
+        src_balance = 0.0
+        if getattr(self.db, "demo_mode_percent", False):
+            from .demowallet import DemoWallet
+            demo = DemoWallet(self.db)
+            src_balance = demo.balance(src, "USDC")
+        else:
+            src_balance = self.db.get_cash() if src == "ethereum" else 0.0
+        if is_pct:
+            amt = src_balance * (val / 100.0)
+        elif val > src_balance > 0:
+            # absolute amount beyond the source balance: clamp to it
+            # (consistent with the position-size clamp philosophy)
+            amt = src_balance
+        else:
+            amt = val
+
+        if not src or not dst or amt <= 0 or src_balance <= 0:
             self.db.add_decision({
                 "cycle_id": cycle_id, "action": "bridge", "status": "rejected",
-                "reason": f"Malformed bridge proposal: {src}->{dst} {amt_raw!r}. {reason}"})
+                "reason": (f"Malformed bridge proposal: {src}->{dst} {amt_raw!r}. "
+                           f"{reason}" if not src or not dst else
+                           f"Nothing to bridge: {src_balance:.4f} USDC on {src}. {reason}")})
             return
         if getattr(self.db, "demo_mode_percent", False):
             # demo mode: settle against the demo wallet (gas deducted on src)

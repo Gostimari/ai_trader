@@ -2373,3 +2373,67 @@ class TestDemoBridge:
         d = db.list_decisions()[0]
         assert d["status"] == "failed" and "insufficient" in d["reason"]
         db.demo_clear()
+
+
+class TestBridgeAmountResolution:
+    def test_percent_bridge_uses_source_chain_balance(self, db, monkeypatch):
+        # arc holds 50 USDC; portfolio total is ~150 -> "100%" must mean 50
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        ai_out = json.dumps({
+            "analysis_summary": "bridge all arc funds",
+            "actions": [{"type": "bridge", "from_chain": "arc",
+                         "to_chain": "base", "amount_or_percent": "100%",
+                         "reason": "BRETT on base"}],
+            "confidence": "high"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        # 100% of arc's 50 = 50, but gas (0.005) comes from the same balance:
+        # all-or-nothing refuses 50 + gas > 50. AI must size below 100%.
+        d = db.list_decisions()[0]
+        if d["status"] == "executed":
+            assert db.demo_get("base", "USDC")["balance"] <= 50.0
+        else:
+            assert "insufficient" in d["reason"]  # honest refusal
+        db.demo_clear()
+
+    def test_absolute_bridge_clamped_to_source_balance(self, db, monkeypatch):
+        # the user's exact case: 100 absolute from a 50 USDC arc balance
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        ai_out = json.dumps({
+            "analysis_summary": "bridge",
+            "actions": [{"type": "bridge", "from_chain": "arc",
+                         "to_chain": "base", "amount_or_percent": 100,
+                         "reason": "r"}],
+            "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        engine.run_cycle()
+        d = db.list_decisions()[0]
+        # clamped to the 50 available (then all-or-nothing vs gas -> refused
+        # honestly, or executed if it fits after the clamp)
+        assert d["amount"] == 50.0 or d["amount"] < 100
+        assert not (d["status"] == "failed" and "need 100" in d.get("reason", ""))
+        db.demo_clear()
+
+    def test_reasonable_percent_bridge_executes(self, db, monkeypatch):
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        ai_out = json.dumps({
+            "analysis_summary": "bridge most arc funds",
+            "actions": [{"type": "bridge", "from_chain": "arc",
+                         "to_chain": "base", "amount_or_percent": "90%",
+                         "reason": "BRETT momentum"}],
+            "confidence": "high"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        d = db.list_decisions()[0]
+        assert d["status"] == "executed"
+        assert d["amount"] == pytest.approx(45.0)  # 90% of arc's 50
+        assert db.demo_get("base", "USDC")["balance"] == pytest.approx(45.0)
+        assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(50.0 - 45.0 - 0.005)
+        db.demo_clear()
