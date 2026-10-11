@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from .constraints import ConstraintValidator, STABLECOIN
 from .db import Database, utcnow
 from .market import MarketDataError, MarketDataModule
-from .news import NewsModule
 from .portfolio import PortfolioTracker
 from .settings import Constraints
 
@@ -91,12 +90,12 @@ Rules:
 
 class DecisionEngine:
     def __init__(self, db: Database, constraints: Constraints,
-                 market: MarketDataModule, news: NewsModule, live_executor=None,
+                 market: MarketDataModule, news=None, live_executor=None,
                  onchain_secrets=None):
         self.db = db
         self.constraints = constraints
         self.market = market
-        self.news = news
+        self.news = news  # unused; retained for API compatibility
         self.live_executor = live_executor
         self._onchain_secrets = onchain_secrets
         self.tracker = PortfolioTracker(db)

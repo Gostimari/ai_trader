@@ -15,7 +15,6 @@ load_dotenv()
 from memicoin_core.ai_engine import DecisionEngine
 from memicoin_core.db import Database
 from memicoin_core.market import MarketDataError, MarketDataModule
-from memicoin_core.news import NewsModule
 from memicoin_core.portfolio import PortfolioTracker
 from memicoin_core.scheduler import DailyScheduler
 from memicoin_core.secrets import SecretStore
@@ -29,7 +28,6 @@ _constraints0 = load_constraints(db)
 if db.get_cash() == 0.0 and not db.get_positions() and not db.list_decisions(1):
     db.set_cash(_constraints0.starting_capital_usd)
 market = MarketDataModule(db)
-news = NewsModule(db)
 tracker = PortfolioTracker(db)
 
 
@@ -37,7 +35,7 @@ secrets = SecretStore()
 
 
 def make_engine() -> DecisionEngine:
-    return DecisionEngine(db, load_constraints(db), market, news,
+    return DecisionEngine(db, load_constraints(db), market,
                           onchain_secrets=secrets)
 
 
@@ -376,11 +374,6 @@ def decisions():
 @app.get("/api/cycles")
 def cycles():
     return {"cycles": db.list_cycles()}
-
-
-@app.get("/api/news")
-def get_news():
-    return {"news": news.get_news()}
 
 
 @app.post("/api/constraints")

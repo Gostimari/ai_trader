@@ -182,7 +182,7 @@ class TestAIParsing:
 class TestEngineCycle:
     def test_invalid_ai_response_never_trades(self, db, monkeypatch):
         c = Constraints()
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         monkeypatch.setattr(engine, "_call_mistral", lambda p: "garbage, not json")
         result = engine.run_cycle()
         assert result["status"] == "invalid"
@@ -191,7 +191,7 @@ class TestEngineCycle:
 
     def test_violating_actions_rejected_and_logged(self, db, monkeypatch):
         c = Constraints(max_position_pct=25.0, allowed_chains=["solana"])
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         ai_out = json.dumps({
             "analysis_summary": "Split views.",
             "actions": [
@@ -211,7 +211,7 @@ class TestEngineCycle:
 
     def test_valid_cycle_executes_and_logs(self, db, monkeypatch):
         c = Constraints()
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         ai_out = json.dumps({
             "analysis_summary": "DOGE momentum looks strong.",
             "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 200, "reason": "strong 24h momentum"}],
@@ -233,7 +233,7 @@ class TestEngineCycle:
 
     def test_custom_prompt_included_in_context(self, db, monkeypatch):
         c = Constraints(custom_prompt="Never buy PEPE.")
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         captured = {}
 
         def fake_call(prompt):
@@ -247,7 +247,7 @@ class TestEngineCycle:
 
     def test_ai_unreachable_no_trades(self, db, monkeypatch):
         c = Constraints()
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
 
         def boom(p):
             raise RuntimeError("connection refused")
@@ -272,10 +272,6 @@ class _FakeMarket:
     def get_market_overview(self, force=False):
         return list(ASSETS.values())
 
-
-class _FakeNews:
-    def get_news(self, force=False):
-        return []
 
 
 class TestSettings:
@@ -348,7 +344,7 @@ class TestSecretStore:
 
     def test_engine_live_requires_configured_executor(self, db, monkeypatch):
         c = Constraints(paper_trading=False)
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews(), live_executor=None)
+        engine = DecisionEngine(db, c, _FakeMarket(), live_executor=None)
         ai_out = json.dumps({
             "analysis_summary": "buy",
             "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 10, "reason": "r"}],
@@ -542,7 +538,7 @@ class TestOnchainAPI:
         class _NullStore:
             def has(self, k): return True
             def get(self, k): return "0x" + "11" * 32  # valid non-zero key
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews(),
+        engine = DecisionEngine(db, c, _FakeMarket(), None,
                                 onchain_secrets=_NullStore())
         ai_out = json.dumps({
             "analysis_summary": "buy",
@@ -865,7 +861,7 @@ class TestStablecoinLiquidationAndKey:
         class _Store:
             def get(self, k): return "stored-key" if k == "mistral_api_key" else None
             def has(self, k): return k == "mistral_api_key"
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews(),
+        engine = DecisionEngine(db, c, _FakeMarket(), None,
                                 onchain_secrets=_Store())
         monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
         # patch at the source the method imports from
@@ -912,7 +908,7 @@ class TestPercentAmountBug:
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
         v = ConstraintValidator(db, c)
-        e = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        e = DecisionEngine(db, c, _FakeMarket())
         action = {"type": "buy", "asset": "DOGE", "amount_or_percent": "25%"}
         # validator path
         v_amt = v._resolve_amount(action, PRICES)
@@ -925,7 +921,7 @@ class TestPercentAmountBug:
     def test_full_cycle_enforces_position_limit_on_percent_buy(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         ai_out = json.dumps({
             "analysis_summary": "All-in on DOGE.",
             "actions": [{"type": "buy", "asset": "DOGE",
@@ -956,7 +952,7 @@ class TestDiversifyAndReplan:
     def test_replan_after_full_rejection(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         first = json.dumps({
             "analysis_summary": "all-in",
             "actions": [{"type": "buy", "asset": "DOGE",
@@ -984,7 +980,7 @@ class TestDiversifyAndReplan:
     def test_no_replan_when_something_executed(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         out = json.dumps({
             "analysis_summary": "mixed",
             "actions": [
@@ -1002,7 +998,7 @@ class TestDiversifyAndReplan:
     def test_replan_failure_is_safe(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         first = json.dumps({
             "analysis_summary": "all-in",
             "actions": [{"type": "buy", "asset": "DOGE",
@@ -1027,7 +1023,7 @@ class TestDiversifyAndReplan:
 class TestPerPositionStopLoss:
     def _engine(self, db, stop=20.0):
         c = Constraints(max_position_pct=25.0, per_position_stop_pct=stop)
-        return DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        return DecisionEngine(db, c, _FakeMarket())
 
     def test_losing_position_auto_sold_at_cycle_start(self, db, monkeypatch):
         db.set_cash(100.0)
@@ -1525,7 +1521,7 @@ class TestBridgeAction:
     def test_bridge_paper_mode_logged(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(paper_trading=True)
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         ai_out = json.dumps({
             "analysis_summary": "bridge to arc for tomorrow's opportunity",
             "actions": [{"type": "bridge", "from_chain": "ethereum",
@@ -1544,7 +1540,7 @@ class TestBridgeAction:
         # must be rejected by the engine's bridge validation
         db.set_cash(100.0)
         c = Constraints(paper_trading=True)
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         ai_out = json.dumps({
             "analysis_summary": "bridge",
             "actions": [{"type": "bridge", "to_chain": "arc",
@@ -1560,7 +1556,7 @@ class TestBridgeAction:
         # unparseable amount -> whole AI response invalid, nothing executes
         db.set_cash(100.0)
         c = Constraints(paper_trading=True)
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         ai_out = json.dumps({
             "analysis_summary": "bridge",
             "actions": [{"type": "bridge", "from_chain": "ethereum",
@@ -1583,7 +1579,7 @@ class TestBridgeAction:
     def test_wallet_capabilities_in_prompt(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(paper_trading=True)
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+        engine = DecisionEngine(db, c, _FakeMarket())
         captured = {}
         def fake_call(prompt):
             captured["p"] = prompt
@@ -1668,7 +1664,7 @@ class TestGasFeasibility:
         class _Store:
             def has(self, k): return k == "onchain_private_key"
             def get(self, k): return "0x" + "1" * 64
-        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews(),
+        engine = DecisionEngine(db, c, _FakeMarket(), None,
                                 onchain_secrets=_Store())
         ai_out = json.dumps({
             "analysis_summary": "buy",
