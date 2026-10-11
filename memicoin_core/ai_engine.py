@@ -116,7 +116,8 @@ class DecisionEngine:
             except Exception:
                 pass
         self.validator = ConstraintValidator(db, constraints,
-                                             solana_key_present=solana_present)
+                                             solana_key_present=solana_present,
+                                             market=market)
 
     # ---------- cycle ----------
     def run_cycle(self) -> dict:
@@ -394,16 +395,34 @@ class DecisionEngine:
     # ---------- context & AI call ----------
     def _demo_portfolio_summary(self, prices: dict[str, float]) -> dict:
         """Portfolio state built from the DEMO wallet (what the AI must see
-        in demo mode), with per-chain investable amounts."""
-        from .demowallet import DemoWallet
+        in demo mode), with per-chain investable amounts. Gas/native tokens
+        (ETH etc.) are priced via their wrapped contracts since they are not
+        in the meme-coin symbol map."""
+        from .demowallet import DemoWallet, NATIVE_WRAPPED
         demo = DemoWallet(self.db)
         rows = demo.rows()
+        # batch-price wrapped natives for gas rows (ETH->WETH etc.)
+        wrapped_needed = [NATIVE_WRAPPED[r["chain"]] for r in rows
+                          if r["is_gas"] and r["chain"] in NATIVE_WRAPPED
+                          and r["chain"] != "arc"]
+        wrapped_prices: dict = {}
+        if wrapped_needed:
+            try:
+                wrapped_prices = self.market.get_prices_for_addresses(wrapped_needed)
+            except Exception:
+                pass
         by_chain: dict = {}
         total = 0.0
         for r in rows:
             p = prices.get(r["asset"].upper(), 0.0)
             if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
                 p = 1.0
+            if p <= 0 and r["is_gas"]:
+                w = NATIVE_WRAPPED.get(r["chain"])
+                if r["chain"] == "arc":
+                    p = 1.0
+                elif w:
+                    p = wrapped_prices.get(w.lower(), 0.0)
             entry = {"asset": r["asset"], "chain": r["chain"],
                      "quantity": r["balance"], "is_gas": bool(r["is_gas"]),
                      "value_usd": r["balance"] * p}

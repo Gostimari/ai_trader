@@ -2437,3 +2437,60 @@ class TestBridgeAmountResolution:
         assert db.demo_get("base", "USDC")["balance"] == pytest.approx(45.0)
         assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(50.0 - 45.0 - 0.005)
         db.demo_clear()
+
+
+class TestAiseesAllChains:
+    def test_demo_summary_includes_gas_tokens_valued(self, db, monkeypatch):
+        # the user's setup: ETH on ethereum + base, USDC on arc
+        db.demo_set("ethereum", "ETH", 0.02, is_gas=True)
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        prices = {"USDC": 1.0}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda contracts: {"0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": 2500.0,
+                                               "0x4200000000000000000000000000000000000006": 2500.0})
+        summary = engine._demo_portfolio_summary(prices)
+        # all three chains present with REAL values (not 0)
+        assert set(summary["chains"].keys()) == {"ethereum", "base", "arc"}
+        assert summary["total_value_usd"] == pytest.approx(50.0 + 50.0 + 50.0)
+        # the AI prompt must contain the ETH holdings
+        captured = []
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: captured.append(p) or json.dumps(
+                                {"analysis_summary": "h", "actions": [], "confidence": "low"}))
+        monkeypatch.setattr(engine.market, "get_asset_map", lambda force=False: {})
+        engine.run_cycle()
+        assert "ETH" in captured[0] and "ethereum" in captured[0]
+        assert captured[0].count("ETH") >= 2  # both ETH rows visible
+        db.demo_clear()
+
+    def test_position_cap_uses_full_wallet_value(self, db, monkeypatch):
+        # 25% of the FULL wallet (150) = 37.50, not 25% of arc-only (12.50)
+        db.demo_set("ethereum", "ETH", 0.02, is_gas=True)
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        BRETT_C = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+        c = Constraints(paper_trading=False, live_execution_mode="demo",
+                        max_position_pct=25.0)
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        db.demo_mode_percent = True
+        prices = {"BRETT": 0.006, "ETH": 2500.0, "USDC": 1.0}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda contracts: {"0x4200000000000000000000000000000000000006": 2500.0,
+                                               "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": 2500.0})
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: {"BRETT": {"asset": "BRETT", "chain": "base",
+                                                            "contract": BRETT_C}})
+        action = {"type": "buy", "asset": "BRETT", "amount_or_percent": 10_000_000,
+                  "_chain": "base", "_price": 0.006, "_contract": BRETT_C}
+        r = engine.validator.validate_action(action, prices,
+                                             engine.market.get_asset_map())
+        assert r.ok
+        # cap = 25% of 150 = 37.50 -> 6250 BRETT at 0.006
+        assert action["amount"] == pytest.approx(6250.0)
+        db.demo_mode_percent = False
+        db.demo_clear()

@@ -84,11 +84,18 @@ def resolve_action_amount(action: dict, prices: dict[str, float],
 
 
 class ConstraintValidator:
-    def __init__(self, db, constraints: Constraints, solana_key_present: bool = False):
+    def __init__(self, db, constraints: Constraints, solana_key_present: bool = False,
+                 market=None):
         self.db = db
         self.constraints = constraints
         self.tracker = PortfolioTracker(db)
         self._solana_key = solana_key_present
+        self._market = market
+
+    def _market_addr_prices(self, contracts):
+        if self._market is None:
+            return {}
+        return self._market.get_prices_for_addresses(contracts)
 
     def check_stop_conditions(self, prices: dict[str, float]) -> ValidationResult:
         c = self.constraints
@@ -174,14 +181,30 @@ class ConstraintValidator:
             cost = amount * price
             # portfolio total: paper books in paper mode; demo wallet otherwise
             if getattr(self.db, "demo_mode_percent", False):
-                from .demowallet import DemoWallet
+                from .demowallet import DemoWallet, NATIVE_WRAPPED
                 demo = DemoWallet(self.db)
+                # gas tokens price via wrapped contracts (not in symbol map)
+                wrapped_needed = [NATIVE_WRAPPED[r["chain"]] for r in demo.rows()
+                                 if r["is_gas"] and r["chain"] in NATIVE_WRAPPED
+                                 and r["chain"] != "arc"]
+                wrapped_prices: dict = {}
+                if wrapped_needed:
+                    try:
+                        wrapped_prices = self._market_addr_prices(wrapped_needed)
+                    except Exception:
+                        wrapped_prices = {}
                 total = 0.0
                 held_qty = 0.0
                 for r in demo.rows():
                     p = prices.get(r["asset"].upper(), 0.0)
                     if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
                         p = 1.0
+                    if p <= 0 and r["is_gas"]:
+                        w = NATIVE_WRAPPED.get(r["chain"])
+                        if r["chain"] == "arc":
+                            p = 1.0
+                        elif w:
+                            p = wrapped_prices.get(w.lower(), 0.0)
                     total += r["balance"] * p
                     if r["asset"] == asset or r.get("contract", "").lower() == (action.get("asset") or "").lower():
                         held_qty = r["balance"]
