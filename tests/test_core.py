@@ -51,17 +51,23 @@ class TestConstraints:
         r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 10}, PRICES, ASSETS)
         assert not r.ok and "not in allowed chains" in r.reason
 
-    def test_max_position_size_enforced(self, db):
+    def test_max_position_size_clamped_not_rejected(self, db):
         c = Constraints(max_position_pct=25.0)
         v = ConstraintValidator(db, c)
-        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 600}, PRICES, ASSETS)
-        assert not r.ok and "Max position size" in r.reason
+        action = {"type": "buy", "asset": "DOGE", "amount_or_percent": 600}
+        r = v.validate_action(action, PRICES, ASSETS)
+        assert r.ok  # clamped, not rejected
+        # $100 portfolio * 25% = $25 max; at $0.10 -> 250 DOGE
+        assert action["amount"] == pytest.approx(250.0)
+        assert "clamped" in action["_clamped"]
 
-    def test_buy_exceeding_cash_rejected(self, db):
+    def test_buy_exceeding_cash_clamped_to_cash(self, db):
         c = Constraints()
         v = ConstraintValidator(db, c)
-        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 2000}, PRICES, ASSETS)
-        assert not r.ok and "exceeds available cash" in r.reason
+        action = {"type": "buy", "asset": "DOGE", "amount_or_percent": 2000}
+        r = v.validate_action(action, PRICES, ASSETS)
+        assert r.ok  # clamped down to available cash
+        assert action["amount"] <= 1000.0 + 1e-6  # $100 cash / $0.10
 
     def test_sell_more_than_holdings_rejected(self, db):
         c = Constraints()
@@ -100,11 +106,13 @@ class TestConstraints:
         r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 100}, PRICES, ASSETS)
         assert r.ok
 
-    def test_full_control_still_enforces_position_limit(self, db):
+    def test_full_control_still_clamps_position_limit(self, db):
         c = Constraints(autonomy_mode="full_control", max_position_pct=25.0)
         v = ConstraintValidator(db, c)
-        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 600}, PRICES, ASSETS)
-        assert not r.ok  # technical limits still apply even in full_control
+        action = {"type": "buy", "asset": "DOGE", "amount_or_percent": 600}
+        r = v.validate_action(action, PRICES, ASSETS)
+        assert r.ok  # clamped even in full_control: technical limits apply
+        assert action["amount"] == pytest.approx(250.0)
 
 
 class TestPortfolio:
@@ -889,15 +897,15 @@ class TestPercentAmountBug:
     Bug found in user testing: validator read '50%' as 50 UNITS, executor
     read it as 50% OF PORTFOLIO -> position limits bypassed."""
 
-    def test_percent_buy_rejected_over_position_limit(self, db):
+    def test_percent_buy_clamped_over_position_limit(self, db):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
         v = ConstraintValidator(db, c)
-        # AI proposes to spend 100% of the portfolio on DOGE
-        r = v.validate_action({"type": "buy", "asset": "DOGE",
-                               "amount_or_percent": "100%"}, PRICES, ASSETS)
-        assert not r.ok, "buy of 100% of portfolio must be rejected at 25% limit"
-        assert "Max position size" in r.reason
+        action = {"type": "buy", "asset": "DOGE", "amount_or_percent": "100%"}
+        r = v.validate_action(action, PRICES, ASSETS)
+        assert r.ok
+        assert action["amount"] == pytest.approx(250.0)  # $25 at $0.10
+        assert "clamped" in action["_clamped"]
 
     def test_percent_buy_within_limit_passes(self, db):
         db.set_cash(100.0)
@@ -923,10 +931,10 @@ class TestPercentAmountBug:
         # 25% of $100 portfolio at $0.10 = 250 units
         assert v_amt == pytest.approx(250.0)
 
-    def test_full_cycle_enforces_position_limit_on_percent_buy(self, db, monkeypatch):
+    def test_full_cycle_clamps_position_limit_on_percent_buy(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
-        engine = DecisionEngine(db, c, _FakeMarket())
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
         ai_out = json.dumps({
             "analysis_summary": "All-in on DOGE.",
             "actions": [{"type": "buy", "asset": "DOGE",
@@ -936,32 +944,35 @@ class TestPercentAmountBug:
         monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
         result = engine.run_cycle()
         assert result["status"] == "completed"
-        assert len(result["rejected"]) == 1
-        assert len(result["executed"]) == 0
-        assert db.get_cash() == pytest.approx(100.0)  # untouched
-        assert db.get_positions() == []
+        assert len(result["executed"]) == 1  # clamped, executed at the limit
+        assert len(result["rejected"]) == 0
+        assert db.get_cash() == pytest.approx(75.0)  # spent only the 25% cap
+        p = db.get_position("DOGE")
+        assert p["quantity"] == pytest.approx(250.0)
         d = db.list_decisions()[0]
-        assert d["status"] == "rejected" and "Max position size" in d["reason"]
+        assert d["status"] == "executed" and "clamped" in d["reason"]
 
     def test_absolute_amount_still_validated(self, db):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
         v = ConstraintValidator(db, c)
-        # 900 units * $0.10 = $90 > $25 limit
-        r = v.validate_action({"type": "buy", "asset": "DOGE",
-                               "amount_or_percent": 900}, PRICES, ASSETS)
-        assert not r.ok and "Max position size" in r.reason
+        action = {"type": "buy", "asset": "DOGE", "amount_or_percent": 900}
+        r = v.validate_action(action, PRICES, ASSETS)
+        assert r.ok and action["amount"] == pytest.approx(250.0)
 
 
 class TestDiversifyAndReplan:
     def test_replan_after_full_rejection(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
-        engine = DecisionEngine(db, c, _FakeMarket())
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        # DOGE already at max (25% of portfolio) -> buy fully rejected, no clamp room
+        db.upsert_position("DOGE", "binance-smart-chain", 250, 25)
+        db.set_cash(75.0)
         first = json.dumps({
-            "analysis_summary": "all-in",
+            "analysis_summary": "more DOGE",
             "actions": [{"type": "buy", "asset": "DOGE",
-                         "amount_or_percent": "100%", "reason": "moon"}],
+                         "amount_or_percent": "10%", "reason": "moon"}],
             "confidence": "high",
         })
         second = json.dumps({
@@ -985,7 +996,7 @@ class TestDiversifyAndReplan:
     def test_no_replan_when_something_executed(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
-        engine = DecisionEngine(db, c, _FakeMarket())
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
         out = json.dumps({
             "analysis_summary": "mixed",
             "actions": [
@@ -998,26 +1009,28 @@ class TestDiversifyAndReplan:
         monkeypatch.setattr(engine, "_call_mistral", lambda p: calls.append(p) or out)
         result = engine.run_cycle()
         assert len(calls) == 1                      # no replan round
-        assert len(result["executed"]) == 1 and len(result["rejected"]) == 1
+        assert len(result["executed"]) == 2 and len(result["rejected"]) == 0
+        # the 100% buy was clamped to the 25% limit, not rejected
 
     def test_replan_failure_is_safe(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(max_position_pct=25.0)
-        engine = DecisionEngine(db, c, _FakeMarket())
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        db.upsert_position("DOGE", "binance-smart-chain", 250, 25)
+        db.set_cash(75.0)
         first = json.dumps({
-            "analysis_summary": "all-in",
+            "analysis_summary": "more DOGE",
             "actions": [{"type": "buy", "asset": "DOGE",
-                         "amount_or_percent": "100%", "reason": "moon"}],
+                         "amount_or_percent": "10%", "reason": "moon"}],
             "confidence": "high",
         })
         def fake_call(prompt):
-            # the replan prompt contains the rejection feedback marker
             return first if "were ALL rejected" not in prompt else "garbage not json"
         monkeypatch.setattr(engine, "_call_mistral", fake_call)
         result = engine.run_cycle()
         assert result["status"] == "completed"
         assert result["executed"] == []
-        assert db.get_cash() == pytest.approx(100.0)  # untouched either way
+        assert db.get_cash() == pytest.approx(75.0)  # untouched either way
 
     def test_prompt_teaches_diversification(self):
         from memicoin_core.ai_engine import BASE_INSTRUCTIONS

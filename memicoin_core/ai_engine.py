@@ -185,6 +185,9 @@ class DecisionEngine:
                     })
                     continue
                 self.db.set_setting("last_cycle_id", cycle_id)
+                clamp_note = a.pop("_clamped", None)
+                if clamp_note:
+                    a["reason"] = (a.get("reason", "") + " | " + clamp_note).strip(" |")
                 err = self._execute(cycle_id, a, prices)
                 if err:
                     failed.append(a)

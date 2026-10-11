@@ -101,6 +101,15 @@ class ConstraintValidator:
                     return r
             return ValidationResult(True, "")
 
+        # resolve asset: the AI may reference by symbol OR contract address
+        info = known_assets.get(asset)
+        if info is None:
+            for a in known_assets.values():
+                if (a.get("contract") or "").lower() == asset.lower():
+                    info = a
+                    asset = a["asset"]
+                    action["asset"] = asset  # normalize for the executor too
+                    break
         r = self._validate_asset(asset, known_assets)
         if not r.ok:
             return r
@@ -113,20 +122,41 @@ class ConstraintValidator:
             if price is None or price <= 0:
                 return ValidationResult(False, f"No reliable price for {asset}; refusing to buy.")
             cost = amount * price
-            cash = self.db.get_cash()
-            if cost > cash:
-                return ValidationResult(False, f"Buy of ${cost:.2f} exceeds available cash ${cash:.2f}.")
             summary = self.tracker.summary(prices)
             total = summary["total_value_usd"]
             max_usd = total * c.effective_max_position_pct() / 100
             existing = self.db.get_position(asset)
             existing_value = (existing["quantity"] * price) if existing else 0.0
             if existing_value + cost > max_usd + 1e-9:
-                return ValidationResult(
-                    False,
-                    f"Max position size {c.effective_max_position_pct():.0f}% "
-                    f"(${max_usd:.2f}) would be exceeded for {asset}.",
-                )
+                # CLAMP instead of reject: buy the most the constraint allows
+                room_usd = max_usd - existing_value
+                if room_usd <= 0:
+                    return ValidationResult(
+                        False,
+                        f"Position in {asset} is already at the max size "
+                        f"({c.effective_max_position_pct():.0f}% = ${max_usd:.2f}).",
+                    )
+                clamped_qty = room_usd / price
+                if clamped_qty <= 0 or clamped_qty * price < 1e-9:
+                    return ValidationResult(
+                        False,
+                        f"Max position for {asset} leaves an unusable amount (${room_usd:.4f}).",
+                    )
+                cash = self.db.get_cash()
+                if room_usd > cash:
+                    room_usd = cash
+                    clamped_qty = cash / price
+                    if clamped_qty <= 0:
+                        return ValidationResult(
+                            False, f"Buy exceeds available cash ${cash:.2f} and no room remains.")
+                # adjust the action in place; the executor uses the clamped amount
+                action["amount"] = clamped_qty
+                action["amount_or_percent"] = clamped_qty
+                action["_clamped"] = (f"AI asked for {amount:.6f} {asset} "
+                                      f"(${cost:.2f}); clamped to {clamped_qty:.6f} "
+                                      f"(${clamped_qty * price:.2f}) to respect the "
+                                      f"{c.effective_max_position_pct():.0f}% position limit.")
+                return ValidationResult(True, "")
         elif a_type == "sell":
             pos = self.db.get_position(asset)
             if not pos or pos["quantity"] <= 0:
