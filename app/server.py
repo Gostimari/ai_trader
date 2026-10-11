@@ -89,15 +89,22 @@ def _demo_wallet_view():
     demo = DemoWallet(db)
     from memicoin_core.demowallet import NATIVE_WRAPPED
     all_rows = demo.rows()
+    # prices and addr_prices fail INDEPENDENTLY: one source being down
+    # must not wipe the other (this wiped symbol prices -> $0 tokens)
     try:
         prices = market.get_prices()
-        contracts = [r["contract"] for r in all_rows if r.get("contract")]
-        for r in all_rows:
-            if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc":
-                contracts.append(NATIVE_WRAPPED[r["chain"]])
-        addr_prices = market.get_prices_for_addresses(contracts)
     except MarketDataError:
-        prices, addr_prices = {}, {}
+        prices = {}
+    contracts = [r["contract"] for r in all_rows if r.get("contract")]
+    for r in all_rows:
+        if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc":
+            contracts.append(NATIVE_WRAPPED[r["chain"]])
+    addr_prices = {}
+    if contracts:
+        try:
+            addr_prices = market.get_prices_for_addresses(contracts)
+        except Exception:
+            addr_prices = {}
     # batch the wrapped contracts even when the loop above failed silently
     try:
         extra = [NATIVE_WRAPPED[r["chain"]] for r in all_rows
@@ -744,14 +751,18 @@ def demo_wallet_rows():
     from memicoin_core.demowallet import NATIVE_WRAPPED
     try:
         prices = market.get_prices()
-        contracts = [r["contract"] for r in rows if r.get("contract")]
-        # gas/native tokens have no contract: price via their wrapped twin
-        for r in rows:
-            if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc":
-                contracts.append(NATIVE_WRAPPED[r["chain"]])
-        addr_prices = market.get_prices_for_addresses(contracts)
     except MarketDataError:
-        prices, addr_prices = {}, {}
+        prices = {}
+    contracts = [r["contract"] for r in rows if r.get("contract")]
+    for r in rows:
+        if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc":
+            contracts.append(NATIVE_WRAPPED[r["chain"]])
+    addr_prices = {}
+    if contracts:
+        try:
+            addr_prices = market.get_prices_for_addresses(contracts)
+        except Exception:
+            addr_prices = {}
     out = []
     for r in rows:
         p = prices.get(r["asset"].upper(), 0.0)

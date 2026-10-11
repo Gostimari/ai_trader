@@ -2560,3 +2560,44 @@ class TestDemoPnL:
         row = s["wallet_view"]["chains"]["arc"][0]
         assert row["pnl_usd"] is None or row["pnl_usd"] == pytest.approx(0.0)
         db.demo_clear()
+
+
+class TestDemoBasisAndClear:
+    def test_manual_rows_get_no_basis(self, db):
+        db.demo_set("ethereum", "ETH", 0.02, is_gas=True)
+        row = db.demo_get("ethereum", "ETH")
+        assert row["cost_basis_usd"] == 0.0  # no bogus basis -> P&L shows '-'
+
+    def test_bot_trades_still_get_basis(self, db):
+        from memicoin_core.demowallet import DemoWallet
+        d = DemoWallet(db)
+        db.demo_set("base", "ETH", 0.01, is_gas=True)
+        db.demo_set("base", "USDC", 100.0)
+        ok, _ = d.swap("base", "USDC", "", "BRETT", "0x1",
+                       50.0, price_from=1.0, price_to=0.006)
+        assert ok
+        assert db.demo_get("base", "BRETT", "0x1")["cost_basis_usd"] == pytest.approx(50.0)
+
+    def test_clear_resets_everything_including_basis(self, db):
+        db.demo_set("base", "BRETT", 100.0, contract="0x1", cost_basis_usd=50.0)
+        assert db.demo_get("base", "BRETT", "0x1")["cost_basis_usd"] == 50.0
+        db.demo_clear()
+        assert db.demo_get("base", "BRETT", "0x1") is None
+        assert db.demo_rows() == []
+
+    def test_token_priced_when_addr_pricer_fails(self, db, monkeypatch):
+        # regression: one pricing source failing must not zero all values
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        db.demo_set("base", "BRETT", 100.0, contract="0x532f27101965dd16442E59d40670FaF5eBB142E4")
+        monkeypatch.setattr(srv.market, "get_prices",
+                            lambda force=False: {"BRETT": 0.006})
+        def boom(contracts):
+            raise Exception("addr pricer down")
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses", boom)
+        c = TestClient(srv.app)
+        s = c.get("/api/state").json()
+        row = s["wallet_view"]["chains"]["base"][0]
+        assert row["value_usd"] == pytest.approx(0.6)  # symbol price survived
+        db.demo_clear()

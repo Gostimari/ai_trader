@@ -236,6 +236,9 @@ class Database:
     def demo_set(self, chain: str, asset: str, balance: float,
                  contract: str = "", is_gas: bool = False,
                  cost_basis_usd: float | None = None) -> None:
+        """User-facing row setter. Cost basis is ONLY set when explicitly
+        given (bot trades pass it); manual user rows get NO basis (0) so
+        their P&L shows '-' honestly instead of a bogus number."""
         with _lock:
             self.conn.execute(
                 "INSERT INTO demo_wallet (id, chain, asset, contract, balance, is_gas, cost_basis_usd) "
@@ -243,7 +246,7 @@ class Database:
                 "balance=excluded.balance, is_gas=excluded.is_gas, "
                 "cost_basis_usd=COALESCE(excluded.cost_basis_usd, demo_wallet.cost_basis_usd)",
                 (new_id(), chain, asset, contract, balance, 1 if is_gas else 0,
-                 cost_basis_usd if cost_basis_usd is not None else balance),
+                 cost_basis_usd or 0.0),
             )
             self.conn.commit()
 
