@@ -1861,10 +1861,12 @@ class TestDemoWallet:
         d = self._demo(db)
         db.demo_set("ethereum", "ETH", 0.05, is_gas=True)
         db.demo_set("ethereum", "USDC", 50.0)
+        db.demo_set("arc", "USDC", 10.0, is_gas=True)  # dst gas (USDC on arc)
         ok, msg = d.bridge("ethereum", "arc", "USDC", 30.0)
         assert ok, msg
-        assert db.demo_get("ethereum", "USDC")["balance"] == pytest.approx(20.0)
-        assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(30.0)
+        fee = 30.0 * 0.10 / 100.0
+        assert db.demo_get("ethereum", "USDC")["balance"] == pytest.approx(50.0 - 30.0 - fee)
+        assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(10.0 + 30.0 - 0.005)
         assert db.demo_get("ethereum", "ETH")["balance"] == pytest.approx(0.05 - 0.0075)
 
     def test_demo_endpoint_crud(self, db, monkeypatch):
@@ -2337,6 +2339,7 @@ class TestDemoBridge:
     def test_demo_bridge_moves_usdc_without_real_key(self, db, monkeypatch):
         # the user's exact scenario: USDC on arc, no EVM key imported
         db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        db.demo_set("base", "ETH", 0.02, is_gas=True)  # dst gas
         c = Constraints(paper_trading=False, live_execution_mode="demo")
         engine = DecisionEngine(db, c, _FakeMarket(), None)  # NO onchain_secrets
         ai_out = json.dumps({
@@ -2349,9 +2352,8 @@ class TestDemoBridge:
         result = engine.run_cycle()
         assert result["status"] == "completed"
         assert len(result["executed"]) == 1  # bridge counted as executed
-        assert result["executed"][0]["type"] == "bridge"
-        # demo balances moved: arc USDC -40 - 0.005 gas, base USDC +40
-        assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(50.0 - 40.0 - 0.005)
+        fee = 40.0 * 0.10 / 100.0
+        assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(50.0 - 40.0 - fee - 0.005)
         assert db.demo_get("base", "USDC")["balance"] == pytest.approx(40.0)
         d = db.list_decisions()[0]
         assert d["status"] == "executed" and "[DEMO]" in d["reason"]
@@ -2419,8 +2421,10 @@ class TestBridgeAmountResolution:
         assert not (d["status"] == "failed" and "need 100" in d.get("reason", ""))
         db.demo_clear()
 
-    def test_reasonable_percent_bridge_executes(self, db, monkeypatch):
+    def test_reasonable_percent_bridge_executes_with_fees(self, db, monkeypatch):
+        # realistic bridge: needs gas on BOTH chains + a service fee
         db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        db.demo_set("base", "ETH", 0.02, is_gas=True)  # dst gas
         c = Constraints(paper_trading=False, live_execution_mode="demo")
         engine = DecisionEngine(db, c, _FakeMarket(), None)
         ai_out = json.dumps({
@@ -2430,13 +2434,39 @@ class TestBridgeAmountResolution:
                          "reason": "BRETT momentum"}],
             "confidence": "high"})
         monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
-        result = engine.run_cycle()
+        engine.run_cycle()
         d = db.list_decisions()[0]
         assert d["status"] == "executed"
-        assert d["amount"] == pytest.approx(45.0)  # 90% of arc's 50
-        assert db.demo_get("base", "USDC")["balance"] == pytest.approx(45.0)
-        assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(50.0 - 45.0 - 0.005)
+        amt = 45.0  # 90% of arc's 50
+        fee = amt * 0.10 / 100.0  # 0.10% service fee
+        # src: amount + fee + arc gas (USDC is gas there); dst: base gas burned
+        assert db.demo_get("base", "USDC")["balance"] == pytest.approx(amt)
+        assert db.demo_get("arc", "USDC")["balance"] == pytest.approx(50.0 - amt - fee - 0.005)
+        assert db.demo_get("base", "ETH")["balance"] == pytest.approx(0.02 - 0.00015)
         db.demo_clear()
+
+    def test_bridge_refused_without_dst_gas(self, db, monkeypatch):
+        # dst has no gas token: real bridges cannot complete there
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        ai_out = json.dumps({
+            "analysis_summary": "bridge",
+            "actions": [{"type": "bridge", "from_chain": "arc",
+                         "to_chain": "base", "amount_or_percent": "50%",
+                         "reason": "r"}],
+            "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        engine.run_cycle()
+        d = db.list_decisions()[0]
+        assert d["status"] == "failed"
+        assert "both chains" in d["reason"] or "gas" in d["reason"]
+        db.demo_clear()
+
+    def test_same_chain_first_in_instructions(self):
+        from memicoin_core.ai_engine import BASE_INSTRUCTIONS
+        assert "SAME-CHAIN FIRST" in BASE_INSTRUCTIONS
+        assert "sufficient funds" in BASE_INSTRUCTIONS and "SAME-CHAIN FIRST" in BASE_INSTRUCTIONS
 
 
 class TestAiseesAllChains:

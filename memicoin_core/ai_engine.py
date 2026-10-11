@@ -83,10 +83,15 @@ Rules:
   arc, and other CCTP chains listed in your context) with a "bridge"
   action: {"type": "bridge", "from_chain": "...", "to_chain": "...",
   "amount_or_percent": "50%"}. Bridging takes minutes and the funds only
-  become investable on the NEXT cycle — so when the best opportunity is
-  on a chain where the wallet has no USDC, propose the bridge this cycle
-  and the investment in the following one. Never propose buying on a
-  chain with no funds there; bridge first.
+  become investable on the NEXT cycle.
+- SAME-CHAIN FIRST: bridges are EXPENSIVE — gas on BOTH chains plus a
+  service fee, and the funds sit unusable until the next cycle. Strongly
+  prefer investing with funds ALREADY on a chain before bridging. Only
+  propose a bridge when (a) the source chain has genuinely idle funds,
+  (b) the destination opportunity is clearly better than anything
+  reachable with existing destination funds, and (c) the expected edge
+  exceeds the bridge costs. Never bridge when the destination already
+  has sufficient funds for the intended buy.
 - SOLANA: only propose Solana assets when the context says a Solana key
   is imported; otherwise Solana actions are rejected.
 - TOKEN IDENTIFIERS: each asset in the market data includes its "contract"

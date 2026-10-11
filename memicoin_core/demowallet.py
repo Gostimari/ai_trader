@@ -108,27 +108,42 @@ class DemoWallet:
     def _gas_symbol(self, chain: str) -> str:
         return {"arc": "USDC", "solana": "SOL"}.get(chain, "ETH")
 
+    # Realistic bridge cost model: gas on BOTH chains (burn on src, mint on
+    # dst) plus a bridge service fee, as real bridging almost always goes
+    # through a platform charging a spread/fee.
+    BRIDGE_SERVICE_FEE_PCT = 0.10  # 0.10% service fee on the bridged amount
+
     def bridge(self, src_chain: str, dst_chain: str, asset: str, amount: float) -> tuple[bool, str]:
-        """Simulated CCTP bridge: deduct on src (with gas), credit on dst.
-        All-or-nothing: checks the FULL requirement (amount + gas, which on
-        chains like Arc are the same token) before touching any balance."""
+        """Simulated bridge with REALISTIC costs: gas on the source chain
+        (burn), gas on the destination chain (mint/receive), plus a service
+        fee. All-or-nothing checks before touching any balance."""
         ok, why = self.gas_ok(src_chain)
         if not ok:
             return False, why
+        ok_dst, why_dst = self.gas_ok(dst_chain)
+        if not ok_dst:
+            return False, (f"cannot receive on {dst_chain}: {why_dst} "
+                           f"(real bridges need gas on BOTH chains)")
         have = self.balance(src_chain, asset)
-        gas_cost = self.per_tx_gas(src_chain)
-        gas_sym = self._gas_symbol(src_chain)
-        # total requirement: the bridged amount plus gas; when the asset IS
-        # the gas token (USDC on arc), they come from the same balance
-        if gas_sym == asset:
-            if have + 1e-12 < amount + gas_cost:
-                return False, (f"insufficient {asset} on {src_chain}: have {have:.4f}, "
-                               f"need {amount + gas_cost:.4f} (bridge + gas)")
-        elif have + 1e-12 < amount:
-            return False, f"insufficient {asset} on {src_chain}"
-        # all checks passed: deduct gas, then the amount, then credit
-        self.db.demo_adjust(src_chain, gas_sym, -gas_cost, is_gas=True)
-        self.db.demo_adjust(src_chain, asset, -amount)
+        gas_src = self.per_tx_gas(src_chain)
+        gas_dst = self.per_tx_gas(dst_chain)
+        fee = amount * self.BRIDGE_SERVICE_FEE_PCT / 100.0
+        gas_sym_src = self._gas_symbol(src_chain)
+        gas_sym_dst = self._gas_symbol(dst_chain)
+        # requirement on src: amount + fee + src gas (same balance if asset is gas)
+        need_src = amount + fee
+        if gas_sym_src == asset:
+            need_src += gas_src
+        if have + 1e-12 < need_src:
+            return False, (f"insufficient {asset} on {src_chain}: have {have:.4f}, "
+                           f"need {need_src:.4f} (bridge + {self.BRIDGE_SERVICE_FEE_PCT}% "
+                           f"fee + gas)")
+        # dst gas must exist on the destination (checked via gas_ok above)
+        # all checks passed: deduct fees, move the net amount
+        self.db.demo_adjust(src_chain, gas_sym_src, -gas_src, is_gas=True)
+        self.db.demo_adjust(dst_chain, gas_sym_dst, -gas_dst, is_gas=True)
+        self.db.demo_adjust(src_chain, asset, -(amount + fee))
         self.db.demo_adjust(dst_chain, asset, amount)
         return True, (f"bridged {amount} {asset} {src_chain}->{dst_chain}; "
-                     f"gas {gas_cost} on {src_chain}. Available for the next cycle.")
+                     f"costs: {fee:.4f} {asset} service fee + gas on both chains "
+                     f"({gas_src} src, {gas_dst} dst). Available next cycle.")
