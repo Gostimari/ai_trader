@@ -24,6 +24,12 @@ class Constraints(BaseModel):
         default=20.0, ge=0, le=100,
         description="Hard cap on total drawdown in % of starting capital. Required.",
     )
+    per_position_stop_pct: Optional[float] = Field(
+        default=20.0, ge=0,
+        description="Per-position stop-loss: when a single position is down this %, "
+                    "it is sold to cash/USDC automatically at the next cycle. "
+                    "Set 0 to disable.",
+    )
     risk_profile: RiskProfile = "balanced"
     allowed_chains: list[str] = Field(
         default_factory=lambda: ["solana", "ethereum", "binance-smart-chain", "base", "polygon", "arc"]

@@ -84,6 +84,8 @@
     <form id="settings-form">
       <label>Max loss % (hard stop: trading halts when the portfolio is down this much)
         <input type="number" id="max_loss_pct" step="0.1" min="0" max="100" required value="20"></label>
+      <label>Per-position stop-loss % (a position down this much is auto-sold to cash/USDC at the next cycle; 0 = off)
+        <input type="number" id="per_position_stop_pct" step="0.1" min="0" value="20"></label>
       <label>Profit target % (optional: stop when up this much)
         <input type="number" id="profit_target_pct" step="0.1" min="0" placeholder="e.g. 50"></label>
       <label>Max position size (% of portfolio in one asset)

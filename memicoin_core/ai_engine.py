@@ -103,6 +103,12 @@ class DecisionEngine:
                                   "status": "failed", "reason": f"Market data unavailable: {e}"})
             return {"cycle_id": cycle_id, "status": "failed", "error": str(e)}
 
+        # ---- per-position stop-loss sweep (deterministic, code-enforced) ----
+        stop_sold = self._apply_per_position_stops(cycle_id, prices, assets)
+        if stop_sold is None:  # market data failed mid-sweep; be safe, abort cycle
+            self.db.finish_cycle(cycle_id, "failed", "", "", error="market data failure during stop-loss sweep")
+            return {"cycle_id": cycle_id, "status": "failed", "error": "stop-loss sweep: market data"}
+
         stop = self.validator.check_stop_conditions(prices)
         if not stop.ok:
             self.db.finish_cycle(cycle_id, "blocked", "", "", error=stop.reason)
@@ -197,6 +203,46 @@ class DecisionEngine:
             "confidence": decision.confidence,
             "executed": executed, "rejected": rejected, "failed": failed,
         }
+
+
+    def _apply_per_position_stops(self, cycle_id: str, prices: dict[str, float],
+                                  assets: dict[str, dict]) -> list | None:
+        """Sell every position that is down >= per_position_stop_pct into cash.
+        Deterministic — not an AI decision. Returns list of sold assets, or
+        None on market-data failure (caller aborts the cycle safely)."""
+        c = self.constraints
+        threshold = getattr(c, "per_position_stop_pct", None) or 0
+        if threshold <= 0:
+            return []
+        sold = []
+        for p in list(self.db.get_positions()):
+            asset = p["asset"]
+            price = prices.get(asset, 0.0)
+            if price <= 0:
+                continue  # no reliable price: do NOT trade blindly
+            value = p["quantity"] * price
+            cost = p["cost_basis_usd"]
+            if cost <= 0:
+                continue
+            drawdown_pct = (value - cost) / cost * 100
+            if drawdown_pct > -threshold:
+                continue  # within limit
+            action = {"type": "sell", "asset": asset,
+                      "amount": p["quantity"],
+                      "amount_or_percent": p["quantity"],
+                      "reason": f"automatic stop-loss: position {drawdown_pct:.1f}% "
+                                f"below cost (limit {threshold:.0f}%)"}
+            self.db.set_setting("last_cycle_id", cycle_id)
+            err = self._execute(cycle_id, action, prices)
+            if err is None:
+                sold.append(asset)
+            else:
+                self.db.add_decision({
+                    "cycle_id": cycle_id, "action": "sell", "asset_in": asset,
+                    "status": "failed",
+                    "reason": f"Stop-loss sell failed: {err}",
+                })
+        return sold
 
     # ---------- context & AI call ----------
     def _build_context(self, prices: dict[str, float], assets: dict[str, dict],

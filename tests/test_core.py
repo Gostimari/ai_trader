@@ -1017,3 +1017,77 @@ class TestDiversifyAndReplan:
         from memicoin_core.ai_engine import BASE_INSTRUCTIONS
         assert "DIVERSIFY" in BASE_INSTRUCTIONS
         assert "MULTIPLE buys" in BASE_INSTRUCTIONS
+
+
+class TestPerPositionStopLoss:
+    def _engine(self, db, stop=20.0):
+        c = Constraints(max_position_pct=25.0, per_position_stop_pct=stop)
+        return DecisionEngine(db, c, _FakeMarket(), _FakeNews())
+
+    def test_losing_position_auto_sold_at_cycle_start(self, db, monkeypatch):
+        db.set_cash(100.0)
+        engine = self._engine(db, stop=20.0)
+        # position bought at $0.10, now worth $0.07 -> -30%
+        db.upsert_position("DOGE", "binance-smart-chain", 500, 50)
+        db.set_cash(50.0)
+        prices = {"DOGE": 0.07, "SHIB": 0.00001, "PEPE": 0.0000005}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: dict(ASSETS))
+        ai_out = json.dumps({"analysis_summary": "hold", "actions": [],
+                             "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        assert result["status"] == "completed"
+        # DOGE sold: position gone, cash got the proceeds
+        assert db.get_position("DOGE") is None
+        assert db.get_cash() == pytest.approx(50.0 + 500 * 0.07)
+        d = db.list_decisions()[0]
+        assert d["action"] == "sell" and d["status"] == "executed"
+        assert "automatic stop-loss" in d["reason"]
+        assert "-30.0%" in d["reason"]
+
+    def test_healthy_position_not_sold(self, db, monkeypatch):
+        db.set_cash(100.0)
+        engine = self._engine(db, stop=20.0)
+        db.upsert_position("DOGE", "binance-smart-chain", 500, 50)  # +40% at 0.14
+        db.set_cash(50.0)
+        prices = {"DOGE": 0.14, "SHIB": 0.00001, "PEPE": 0.0000005}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: dict(ASSETS))
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: json.dumps({"analysis_summary": "h",
+                                                  "actions": [], "confidence": "low"}))
+        engine.run_cycle()
+        assert db.get_position("DOGE") is not None
+
+    def test_stop_disabled_at_zero(self, db, monkeypatch):
+        db.set_cash(100.0)
+        engine = self._engine(db, stop=0)
+        db.upsert_position("DOGE", "binance-smart-chain", 500, 50)
+        db.set_cash(50.0)
+        prices = {"DOGE": 0.01, "SHIB": 0.00001, "PEPE": 0.0000005}  # -80%
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: dict(ASSETS))
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: json.dumps({"analysis_summary": "h",
+                                                  "actions": [], "confidence": "low"}))
+        engine.run_cycle()
+        assert db.get_position("DOGE") is not None  # stop disabled: kept
+
+    def test_boundary_exactly_at_threshold_sells(self, db, monkeypatch):
+        db.set_cash(100.0)
+        engine = self._engine(db, stop=20.0)
+        db.upsert_position("DOGE", "binance-smart-chain", 500, 50)
+        db.set_cash(50.0)
+        prices = {"DOGE": 0.08, "SHIB": 0.00001, "PEPE": 0.0000005}  # exactly -20%
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: dict(ASSETS))
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: json.dumps({"analysis_summary": "h",
+                                                  "actions": [], "confidence": "low"}))
+        engine.run_cycle()
+        assert db.get_position("DOGE") is None

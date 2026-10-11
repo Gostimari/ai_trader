@@ -50,6 +50,7 @@ async function loadState() {
 function fillSettings(c) {
   $("#profit_target_pct").value = c.profit_target_pct ?? "";
   $("#max_loss_pct").value = c.max_loss_pct;
+    $("#per_position_stop_pct").value = c.per_position_stop_pct ?? "";
   $("#risk_profile").value = c.risk_profile;
   $("#max_position_pct").value = c.max_position_pct;
   $("#allowed_chains").value = (c.allowed_chains || []).join(", ");
@@ -138,6 +139,7 @@ function controls() {
     const c = {
       profit_target_pct: $("#profit_target_pct").value === "" ? null : Number($("#profit_target_pct").value),
       max_loss_pct: Number($("#max_loss_pct").value),
+      per_position_stop_pct: $("#per_position_stop_pct").value === "" ? null : Number($("#per_position_stop_pct").value),
       risk_profile: $("#risk_profile").value,
       max_position_pct: Number($("#max_position_pct").value),
       allowed_chains: $("#allowed_chains").value.split(",").map((s) => s.trim()).filter(Boolean),
