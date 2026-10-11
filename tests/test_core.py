@@ -2624,3 +2624,56 @@ class TestGasFundedPercentBuys:
         assert qty == pytest.approx(spendable * 0.10 / 2.68e-05)
         db.demo_mode_percent = False
         db.demo_clear()
+
+
+class TestAdaptiveReserve:
+    def _demo(self, db):
+        from memicoin_core.demowallet import DemoWallet
+        return DemoWallet(db)
+
+    def test_small_wallet_reserves_one_swap(self, db):
+        # the user's case: 0.0197 ETH on ethereum; per-swap 0.0075
+        db.demo_set("ethereum", "ETH", 0.0197, is_gas=True)
+        d = self._demo(db)
+        reserve = d.gas_reserve("ethereum")
+        assert reserve == pytest.approx(0.0075)  # ONE swap, not three
+        investable = d.investable_gas("ethereum")
+        assert investable == pytest.approx(0.0197 - 0.0075)  # >0 now!
+        db.demo_clear()
+
+    def test_medium_wallet_reserves_half(self, db):
+        # 0.06 ETH = 8 swaps -> reserve 3 (capped)... 8/2=4 -> min(3,4)=3
+        db.demo_set("ethereum", "ETH", 0.06, is_gas=True)
+        d = self._demo(db)
+        assert d.gas_reserve("ethereum") == pytest.approx(0.0075 * 3)
+        db.demo_clear()
+
+    def test_tiny_wallet_reserves_everything_investable_zero(self, db):
+        # below 1 swap: nothing investable, warnings should fire
+        db.demo_set("ethereum", "ETH", 0.005, is_gas=True)  # < 0.0075
+        d = self._demo(db)
+        assert d.investable_gas("ethereum") == 0.0
+        ok, why = d.gas_ok("ethereum")
+        assert not ok  # gas warning path
+        db.demo_clear()
+
+    def test_real_wallet_adaptive_reserve(self):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "ethereum"
+        w.cfg = {"native_symbol": "ETH", "chain_id": 1}
+        w._acct = None
+        w.native = 0.0197
+        w.native_balance = lambda: 0.0197
+        w.w3 = type("W3", (), {
+            "from_wei": staticmethod(lambda v, u: v / 1e18),
+            "eth": type("Eth", (), {"gas_price": 30 * 10**9}),
+        })()
+        # 0.0197/0.0075 = 2.6 swaps -> <2? no, 2.6 -> int(1.3)=1 swap
+        assert w.gas_reserve() == pytest.approx(0.0075)
+        assert w.investable_native() == pytest.approx(0.0197 - 0.0075)
+
+    def test_gas_management_in_instructions(self):
+        from memicoin_core.ai_engine import BASE_INSTRUCTIONS
+        assert "GAS MANAGEMENT" in BASE_INSTRUCTIONS
+        assert "small slice" in BASE_INSTRUCTIONS.replace("\n", " ")

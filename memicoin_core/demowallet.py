@@ -36,7 +36,25 @@ GAS_COST_PER_TX = {
     "arc": 0.005,         # 250k * 20 gwei (floor) in USDC
     "solana": 0.00025,    # ~0.00005 SOL fee x5 buffer for swaps+fees
 }
-RESERVE_TXS = 3  # mirror EVMWallet.RESERVE_SWAPS
+# Adaptive gas reserve (user design): scale the number of reserved swaps to
+# the balance so small gas wallets keep an investable remainder.
+#   balance < 2 swaps  -> reserve exactly 1 swap (minimum protection)
+#   2-8 swaps          -> reserve half the swaps (rounded)
+#   > 8 swaps          -> reserve 3 swaps (the old fixed cap)
+# A wallet that can't even cover 1 swap reserves everything (investable 0)
+# and the existing gas warnings fire.
+RESERVE_SWAPS_CAP = 3
+RESERVE_SWAPS_MIN = 1
+
+
+def reserve_swaps_for(balance: float, per_swap: float) -> int:
+    if per_swap <= 0 or balance <= 0:
+        return RESERVE_SWAPS_MIN
+    swaps_left = balance / per_swap
+    if swaps_left < 2:
+        return RESERVE_SWAPS_MIN
+    return max(RESERVE_SWAPS_MIN,
+               min(RESERVE_SWAPS_CAP, int(swaps_left / 2)))
 
 
 class DemoWallet:
@@ -60,7 +78,8 @@ class DemoWallet:
         return GAS_COST_PER_TX.get(chain, 0.0075)
 
     def gas_reserve(self, chain: str) -> float:
-        return self.per_tx_gas(chain) * RESERVE_TXS
+        return self.per_tx_gas(chain) * reserve_swaps_for(
+            self.gas_balance(chain), self.per_tx_gas(chain))
 
     def investable_gas(self, chain: str) -> float:
         return max(0.0, self.gas_balance(chain) - self.gas_reserve(chain))

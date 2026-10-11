@@ -84,6 +84,13 @@ Rules:
   action: {"type": "bridge", "from_chain": "...", "to_chain": "...",
   "amount_or_percent": "50%"}. Bridging takes minutes and the funds only
   become investable on the NEXT cycle.
+- GAS MANAGEMENT: gas reserves are adaptive - small gas balances reserve
+  only 1 transaction, leaving the rest investable. If a chain's gas token
+  is running low (see the wallet gas figures) you MAY propose swapping a
+  small slice of another held asset into the gas token (e.g. sell a little
+  USDC for ETH on the same chain) to keep future transactions affordable.
+  On a chain holding ONLY the gas token, topping up is impossible without
+  external funds - do not attempt it; the user will see a gas warning.
 - SAME-CHAIN FIRST: bridges are EXPENSIVE — gas on BOTH chains plus a
   service fee, and the funds sit unusable until the next cycle. Strongly
   prefer investing with funds ALREADY on a chain before bridging. Only

@@ -168,12 +168,20 @@ class EVMWallet:
         return True, ""
 
     # ---------- gas reserve ----------
-    RESERVE_SWAPS = 3  # keep enough gas for ~3 future transactions
-
+    # Adaptive (user design): scale reserved swaps to the balance so small
+    # gas wallets keep an investable remainder. Mirrors demowallet's scheme.
     def gas_reserve(self) -> float:
         """Native-token amount held back exclusively for future gas.
         Applies to ALL chains incl. Arc (where USDC itself pays gas)."""
-        return self.estimated_gas_cost() * self.RESERVE_SWAPS
+        per_swap = self.estimated_gas_cost()
+        balance = self.gas_balance()
+        if per_swap <= 0 or balance <= 0:
+            return per_swap  # minimum 1 swap
+        swaps_left = balance / per_swap
+        if swaps_left < 2:
+            return per_swap  # min 1 swap
+        swaps = max(1, min(3, int(swaps_left / 2)))
+        return per_swap * swaps
 
     def investable_native(self) -> float:
         """How much of the native/gas token the bot may safely spend
