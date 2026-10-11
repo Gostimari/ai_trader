@@ -134,7 +134,37 @@ class EVMWallet:
             address=self.w3.to_checksum_address(token), abi=abi)
         return int(contract.functions.decimals().call())
 
-    # ---------- writes ----------
+    # ---------- gas feasibility ----------
+    def gas_balance(self) -> float:
+        """Native token balance available to pay gas (ETH/POL/BNB/USDC-on-Arc)."""
+        return self.native_balance()
+
+    def estimated_gas_cost(self) -> float:
+        """Approximate native-token cost of a swap tx on this chain.
+        Uses a typical DEX-swap gas limit; conservative (over-estimates)."""
+        typical_swap_gas = 250_000  # conservative router swap incl. approval
+        try:
+            price = self.w3.eth.gas_price
+        except Exception:
+            price = 30 * 10 ** 9  # 30 gwei fallback
+        return float(self.w3.from_wei(typical_swap_gas * price, "ether"))
+
+    def gas_ok(self, buffer: float = 1.5) -> tuple[bool, str]:
+        """Can the wallet pay gas for one swap? Arc always passes: USDC is
+        the gas token there and the wallet's USDC balance IS the gas."""
+        native_symbol = self.cfg.get("native_symbol", "ETH")
+        if native_symbol == "USDC":
+            return True, ""
+        bal = self.gas_balance()
+        need = self.estimated_gas_cost() * buffer
+        if bal < need:
+            return False, (f"insufficient gas: {bal:.6f} {native_symbol} < "
+                           f"~{need:.6f} needed for one swap. Top up {native_symbol} "
+                           f"on {self.chain} (a tiny amount suffices) or move "
+                           f"activity to Arc where USDC pays gas.")
+        return True, ""
+
+# ---------- writes ----------
     def _send(self, tx: dict) -> str:
         signed = self._account().sign_transaction(tx)
         h = self.w3.eth.send_raw_transaction(signed["rawTransaction"])

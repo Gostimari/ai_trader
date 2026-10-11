@@ -56,3 +56,8 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 
 .import-mode-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 7px 14px; border-radius: 8px; cursor: pointer; }
 .import-mode-btn.active { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
+
+.gas-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.gas-pill { border-radius: 12px; padding: 4px 12px; font-size: .75rem; border: 1px solid var(--border); }
+.gas-pill.ok { background: #14351f; color: #7ee2a8; }
+.gas-pill.bad { background: #4a1f24; color: #ff9aa5; }

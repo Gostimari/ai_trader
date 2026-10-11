@@ -305,9 +305,39 @@ def wallet_balances():
                          "value_usd": 0.0, "chain": "solana", "kind": "token",
                          "contract": t.get("contract", t.get("address", ""))})
         chains["solana"] = rows
+    # gas health: can the wallet pay for transactions on each chain?
+    gas_health = {}
+    if secrets.has("onchain_private_key"):
+        from memicoin_core.onchain import EVMWallet, EVM_CHAINS
+        for chain in EVM_CHAINS:
+            try:
+                w = EVMWallet(secrets, chain)
+                ok, why = w.gas_ok()
+                gas_health[chain] = {
+                    "ok": ok,
+                    "balance": w.gas_balance(),
+                    "symbol": EVM_CHAINS[chain].get("native_symbol", "ETH"),
+                    "needed": w.estimated_gas_cost() * 1.5,
+                    "hint": why,
+                }
+            except Exception:
+                continue
+    if secrets.has("onchain_solana_private_key"):
+        try:
+            from memicoin_core.onchain import SolanaWallet
+            sw = SolanaWallet(secrets)
+            bal = sw.native_balance()
+            gas_health["solana"] = {
+                "ok": bal > 0.005,  # ~0.005 SOL covers a swap
+                "balance": bal, "symbol": "SOL", "needed": 0.005,
+                "hint": "" if bal > 0.005 else "top up a little SOL for fees",
+            }
+        except Exception:
+            pass
     return {"configured": True, "evm_address": (evm or {}).get("address"),
             "solana_address": (sol or {}).get("address"),
             "chains": chains, "total_usd": total,
+            "gas": gas_health,
             "priced": bool(prices), "error": raw.get("error")}
 
 

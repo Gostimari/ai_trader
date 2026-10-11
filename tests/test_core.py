@@ -541,7 +541,7 @@ class TestOnchainAPI:
         from memicoin_core.secrets import SecretStore
         class _NullStore:
             def has(self, k): return True
-            def get(self, k): return "0x" + "0" * 64
+            def get(self, k): return "0x" + "11" * 32  # valid non-zero key
         engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews(),
                                 onchain_secrets=_NullStore())
         ai_out = json.dumps({
@@ -1594,3 +1594,70 @@ class TestBridgeAction:
         assert "Solana key imported: NO" in captured["p"]
         assert "do NOT propose Solana assets" in captured["p"]
         assert "bridge action available" in captured["p"]
+
+
+class TestGasFeasibility:
+    def _wallet(self, native, chain="ethereum", gas_price=30 * 10**9):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = chain
+        w.cfg = {"native_symbol": "ETH", "chain_id": 1}
+        w._acct = None
+        w.native = native
+        w.gas_price = gas_price
+        def nb(): return native
+        def eg(): return gas_price
+        w.native_balance = nb
+        w.w3 = type("W3", (), {
+            "from_wei": staticmethod(lambda v, u: v / 1e18),
+            "eth": type("Eth", (), {"gas_price": gas_price}),
+        })()
+        return w
+
+    def test_gas_ok_with_native(self):
+        # at 30 gwei a swap needs ~0.0075 ETH; give comfortable margin
+        w = self._wallet(native=0.05)
+        ok, why = w.gas_ok()
+        assert ok, why
+
+    def test_gas_cost_estimate_realistic(self):
+        # 250k gas at 30 gwei = 0.0075 ETH — the check must not underestimate
+        w = self._wallet(native=0.05)
+        cost = w.estimated_gas_cost()
+        assert 0.007 < cost < 0.010
+
+    def test_gas_fails_without_native(self):
+        w = self._wallet(native=0.0)
+        ok, why = w.gas_ok()
+        assert not ok and "insufficient gas" in why
+        assert "Top up" in why
+
+    def test_arc_always_gas_ok(self):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "arc"
+        w.cfg = {"native_symbol": "USDC", "chain_id": 5042}
+        ok, why = w.gas_ok()
+        assert ok  # USDC is the gas token: no separate gas needed
+
+    def test_executor_preflight_blocks_gasless_chain(self, db, monkeypatch):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain",
+                        onchain_chain="base")
+        class _Store:
+            def has(self, k): return k == "onchain_private_key"
+            def get(self, k): return "0x" + "1" * 64
+        engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews(),
+                                onchain_secrets=_Store())
+        ai_out = json.dumps({
+            "analysis_summary": "buy",
+            "actions": [{"type": "buy", "asset": "0x" + "2" * 40,
+                         "amount_or_percent": 1, "reason": "r"}],
+            "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        # call the executor path directly (validator would need the asset
+        # in market data; the gas preflight is what we are testing)
+        err = engine._execute_onchain(
+            "cycle-x",
+            {"type": "buy", "asset": "0x" + "2" * 40,
+             "amount": 1, "reason": "r"}, "0x" + "2" * 40, 1.0)
+        assert err is not None and "gas check failed" in err

@@ -455,9 +455,20 @@ class DecisionEngine:
         look them up from the market snapshot's chain data."""
         from .onchain import EVM_CHAINS, wallet_for
         chain = self.constraints.onchain_chain
+        # SAFETY FIRST: the asset identifier must be a contract/mint address
+        # before anything else (including gas checks) runs.
+        token = action["asset"]
+        if not self._looks_like_address(token):
+            return (f"on-chain swap needs a token contract address for {token!r}; "
+                    f"the AI must provide contract/mint addresses in on-chain mode")
         wallet = wallet_for(chain, self._onchain_secrets)
         if not wallet.configured():
             return f"on-chain mode selected but no {chain} private key imported"
+        # gas pre-flight: can the wallet actually pay for this transaction?
+        if hasattr(wallet, "gas_ok"):
+            ok, why = wallet.gas_ok()
+            if not ok:
+                return f"gas check failed on {chain}: {why}"
         # asset identifiers in on-chain mode are contract addresses/mints,
         # supplied by the AI as the asset field and validated against the
         # chain registry; a bare ticker cannot be traded on-chain.
