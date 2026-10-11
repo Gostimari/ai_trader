@@ -121,6 +121,10 @@ class DecisionEngine:
     # ---------- cycle ----------
     def run_cycle(self) -> dict:
         cycle_id = self.db.start_cycle()
+        # mode flag FIRST: stop checks and amount resolution must both be
+        # demo-aware from the very beginning of the cycle
+        self.db.demo_mode_percent = (not self.constraints.paper_trading
+                                     and self.constraints.live_execution_mode == "demo")
         try:
             prices = self.market.get_prices(force=True)
             assets = self.market.get_asset_map(force=True)
@@ -175,6 +179,17 @@ class DecisionEngine:
                 if a.get("type") == "bridge":
                     self._execute_bridge(cycle_id, a)
                     continue
+                # annotate the token's chain so the percent resolver can
+                # pick the right demo funds
+                info = assets.get(a.get("asset", ""))
+                if info is None:
+                    for cand in assets.values():
+                        if (cand.get("contract") or "").lower() == (a.get("asset") or "").lower():
+                            info = cand
+                            break
+                if info:
+                    a["_chain"] = info.get("chain", "")
+                    a["_price"] = prices.get(info.get("asset", ""), 0.0)
                 result = self.validator.validate_action(a, prices, assets)
                 if not result.ok:
                     rejected.append(a)
@@ -541,7 +556,7 @@ class DecisionEngine:
         (gas deducted, reserve enforced)."""
         from .demowallet import DemoWallet
         demo = DemoWallet(self.db)
-        token = action["asset"]
+        token = action.get("_contract") or action["asset"]
         if not self._looks_like_address(token):
             return (f"demo/on-chain swap needs a token contract address for {token!r}; "
                     f"the AI must provide contract/mint addresses")

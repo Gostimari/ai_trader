@@ -2218,3 +2218,54 @@ class TestContractsInContext:
                                  "confidence": "low"}))
         engine.run_cycle()
         assert BRETT_C in captured[0]  # the AI can see and use it
+
+
+class TestDemoPercentResolution:
+    def test_percent_buy_resolves_against_demo_funds(self, db, monkeypatch):
+        from memicoin_core.constraints import resolve_action_amount
+        db.demo_mode_percent = True
+        db.demo_set("base", "ETH", 0.02, is_gas=True)   # $50 at $2500
+        db.demo_set("base", "USDC", 100.0)               # + $100
+        prices = {"BRETT": 0.006, "ETH": 2500.0, "USDC": 1.0}
+        from memicoin_core.portfolio import PortfolioTracker
+        action = {"type": "buy", "asset": "BRETT", "amount_or_percent": "25%",
+                  "_chain": "base"}
+        qty = resolve_action_amount(action, prices, PortfolioTracker(db), db)
+        # spendable: $100 USDC + investable gas (0.02-0.00045 ETH * 2500 = $48.875)
+        spendable = 100.0 + (0.02 - 0.00015 * 3) * 2500.0
+        assert qty == pytest.approx(spendable * 0.25 / 0.006)
+        db.demo_mode_percent = False
+        db.demo_clear()
+
+    def test_percent_buy_paper_mode_unchanged(self, db):
+        from memicoin_core.constraints import resolve_action_amount
+        from memicoin_core.portfolio import PortfolioTracker
+        db.set_cash(100.0)
+        action = {"type": "buy", "asset": "DOGE", "amount_or_percent": "25%"}
+        qty = resolve_action_amount(action, PRICES, PortfolioTracker(db), db)
+        assert qty == pytest.approx(250.0)  # 25% of $100 at $0.10
+
+    def test_full_demo_cycle_percent_buy_executes(self, db, monkeypatch):
+        # the user's exact failing scenario end to end
+        BRETT_C = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo",
+                        max_position_pct=25.0)
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        prices = {"BRETT": 0.006, "ETH": 2500.0, "USDC": 1.0}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: {"BRETT": {"asset": "BRETT", "chain": "base",
+                                                            "contract": BRETT_C}})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: json.dumps({
+            "analysis_summary": "BRETT momentum",
+            "actions": [{"type": "buy", "asset": BRETT_C,
+                         "amount_or_percent": "25%", "reason": "momentum"}],
+            "confidence": "high"}))
+        result = engine.run_cycle()
+        assert result["status"] == "completed", result.get("error")
+        assert len(result["executed"]) == 1, result
+        brett = db.demo_get("base", "BRETT", BRETT_C)
+        assert brett and brett["balance"] > 0
+        db.demo_clear()

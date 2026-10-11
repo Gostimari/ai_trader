@@ -46,12 +46,39 @@ def resolve_action_amount(action: dict, prices: dict[str, float],
     pct = val / 100.0
     asset = action.get("asset", "")
     if action.get("type") == "buy":
+        # resolve against the funds that will actually pay:
+        # paper mode -> paper portfolio; demo mode -> demo wallet spendables
         total = tracker.total_value(prices)
         price = prices.get(asset, 0.0)
+        if getattr(db, "demo_mode_percent", False):
+            from .demowallet import DemoWallet
+            demo = DemoWallet(db)
+            chain = action.get("_chain", "")
+            spendable_usd = 0.0
+            for r in demo.rows():
+                if chain and r["chain"] != chain:
+                    continue  # fund from the token's chain when known; else all
+                if r["is_gas"]:
+                    p = prices.get(r["asset"], 0.0) or (1.0 if r["asset"] == "USDC" else 0.0)
+                    spendable_usd += demo.investable_gas(r["chain"]) * p
+                else:
+                    p = prices.get(r["asset"], 0.0) or (1.0 if r["asset"] in ("USDC", "USDT") else 0.0)
+                    spendable_usd += r["balance"] * p
+            # the price may come annotated (contract-keyed lookups miss)
+            price = action.get("_price") or price
+            budget = spendable_usd * pct
+            return budget / price if price > 0 else None
         budget = total * pct
         return budget / price if price > 0 else None
     pos = db.get_position(asset)
     if not pos or pos["quantity"] <= 0:
+        # demo mode: sells resolve against the demo wallet holding
+        if getattr(db, "demo_mode_percent", False):
+            from .demowallet import DemoWallet
+            demo = DemoWallet(db)
+            for r in demo.rows():
+                if r["asset"] == asset and r["balance"] > 0:
+                    return r["balance"] * pct
         return None
     return pos["quantity"] * pct
 
@@ -69,9 +96,25 @@ class ConstraintValidator:
             return ValidationResult(False, "Emergency stop is active; all trading halted.")
         if c.trading_paused:
             return ValidationResult(False, "Trading is paused by the user.")
-        summary = self.tracker.summary(prices)
-        start = c.starting_capital_usd
-        pnl_pct = ((summary["total_value_usd"] - start) / start * 100) if start > 0 else 0.0
+        # mode-aware valuation: paper books for paper mode; the live/demo
+        # wallet value otherwise (the paper books are irrelevant there)
+        if getattr(self.db, "demo_mode_percent", False):
+            # demo mode: total = demo wallet value; start = today's first-seen
+            # value is unknown, so drawdown vs cost basis is not measurable the
+            # same way - the per-position stop and manual stops still apply.
+            from .demowallet import DemoWallet
+            demo = DemoWallet(self.db)
+            total = 0.0
+            for r in demo.rows():
+                p = prices.get(r["asset"].upper(), 0.0)
+                if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
+                    p = 1.0
+                total += r["balance"] * p
+            pnl_pct = 0.0  # no external cost basis for demo funds
+        else:
+            summary = self.tracker.summary(prices)
+            start = c.starting_capital_usd
+            pnl_pct = ((summary["total_value_usd"] - start) / start * 100) if start > 0 else 0.0
         if c.max_loss_pct is not None and pnl_pct <= -c.max_loss_pct:
             return ValidationResult(False, f"Max loss stop hit ({pnl_pct:.1f}% <= -{c.max_loss_pct}%). Trading stopped.")
         if c.profit_target_pct is not None and pnl_pct >= c.profit_target_pct:
@@ -101,15 +144,20 @@ class ConstraintValidator:
                     return r
             return ValidationResult(True, "")
 
-        # resolve asset: the AI may reference by symbol OR contract address
+        # resolve asset: the AI may reference by symbol OR contract address.
+        # Keep BOTH: the symbol for validation/pricing, the contract for the
+        # executor (which requires the contract to identify the token).
         info = known_assets.get(asset)
         if info is None:
             for a in known_assets.values():
                 if (a.get("contract") or "").lower() == asset.lower():
                     info = a
+                    action["_contract"] = asset  # preserve for the executor
                     asset = a["asset"]
-                    action["asset"] = asset  # normalize for the executor too
+                    action["asset"] = asset
                     break
+        elif info.get("contract"):
+            action["_contract"] = info["contract"]
         r = self._validate_asset(asset, known_assets)
         if not r.ok:
             return r
@@ -120,13 +168,30 @@ class ConstraintValidator:
         if a_type == "buy":
             price = prices.get(asset)
             if price is None or price <= 0:
+                price = action.get("_price") or 0.0
+            if price is None or price <= 0:
                 return ValidationResult(False, f"No reliable price for {asset}; refusing to buy.")
             cost = amount * price
-            summary = self.tracker.summary(prices)
-            total = summary["total_value_usd"]
+            # portfolio total: paper books in paper mode; demo wallet otherwise
+            if getattr(self.db, "demo_mode_percent", False):
+                from .demowallet import DemoWallet
+                demo = DemoWallet(self.db)
+                total = 0.0
+                held_qty = 0.0
+                for r in demo.rows():
+                    p = prices.get(r["asset"].upper(), 0.0)
+                    if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
+                        p = 1.0
+                    total += r["balance"] * p
+                    if r["asset"] == asset or r.get("contract", "").lower() == (action.get("asset") or "").lower():
+                        held_qty = r["balance"]
+                existing_value = held_qty * price
+            else:
+                summary = self.tracker.summary(prices)
+                total = summary["total_value_usd"]
+                existing = self.db.get_position(asset)
+                existing_value = (existing["quantity"] * price) if existing else 0.0
             max_usd = total * c.effective_max_position_pct() / 100
-            existing = self.db.get_position(asset)
-            existing_value = (existing["quantity"] * price) if existing else 0.0
             if existing_value + cost > max_usd + 1e-9:
                 # CLAMP instead of reject: buy the most the constraint allows
                 room_usd = max_usd - existing_value
