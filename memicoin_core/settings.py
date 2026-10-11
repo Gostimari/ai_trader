@@ -43,8 +43,11 @@ class Constraints(BaseModel):
         default="", description="Behavioral instructions the AI reads before every decision."
     )
     decision_time_utc: str = "00:00"
+    # Class default is the internal test substrate (paper). The APP default
+    # is demo mode - enforced by load_constraints() migration below, so a
+    # fresh install and legacy paper settings both land on demo.
     paper_trading: bool = True
-    live_execution_mode: LiveExecutionMode = "exchange"
+    live_execution_mode: LiveExecutionMode = "demo"
     # chain used for Mode B on-chain swaps (must be in onchain.SUPPORTED_CHAINS)
     onchain_chain: str = "ethereum"
     starting_capital_usd: float = 100.0
@@ -62,6 +65,17 @@ def load_constraints(db) -> Constraints:
     raw = db.get_setting("constraints")
     if raw is None:
         c = Constraints()
+        # fresh install: land on the user-facing default (demo), not the
+        # internal paper test substrate
+        c.paper_trading = False
+        c.live_execution_mode = "demo"
         db.set_setting("constraints", c.to_json())
         return c
-    return Constraints(**{k: v for k, v in raw.items() if k in Constraints.model_fields})
+    c = Constraints(**{k: v for k, v in raw.items() if k in Constraints.model_fields})
+    # two-mode world: the app is demo or real. Paper/exchange are internal
+    # legacy states -> migrate on load.
+    if c.paper_trading or c.live_execution_mode == "exchange":
+        c.paper_trading = False
+        c.live_execution_mode = "demo"
+        db.set_setting("constraints", c.to_json())
+    return c

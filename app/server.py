@@ -63,17 +63,13 @@ def state():
                      "total_pnl_usd": 0, "total_pnl_pct": 0, "total_cost_basis_usd": 0,
                      "as_of": None}
         market_ok = False
-    mode = ("paper" if constraints.paper_trading
-            else ("demo" if constraints.live_execution_mode == "demo" else "real"))
-    # portfolio section content follows the mode:
-    # paper -> virtual positions; real -> wallet holdings; demo -> demo wallet
+    mode = ("demo" if constraints.live_execution_mode != "onchain" else "real")
     wallet_view = None
-    if mode != "paper":
-        try:
-            wb = wallet_balances() if mode == "real" else _demo_wallet_view()
-            wallet_view = wb
-        except Exception:
-            wallet_view = None
+    try:
+        wb = wallet_balances() if mode == "real" else _demo_wallet_view()
+        wallet_view = wb
+    except Exception:
+        wallet_view = None
     return {
         "portfolio": portfolio,
         "mode": mode,
@@ -432,8 +428,9 @@ def cycles():
 @app.post("/api/constraints")
 def set_constraints(c: Constraints):
     current = load_constraints(db)
-    if current.paper_trading and not c.paper_trading:
-        raise HTTPException(400, "Switching to live trading requires explicit confirmation via /api/go-live")
+    entering_real = (not c.paper_trading and c.live_execution_mode == "onchain")
+    if entering_real and current.live_execution_mode != "onchain":
+        raise HTTPException(400, "Switching to real money requires explicit confirmation via /api/go-live")
     db.set_setting("constraints", c.to_json())
     return {"ok": True}
 
@@ -454,14 +451,6 @@ def go_live(req: GoLiveRequest):
     c.live_execution_mode = "onchain"
     db.set_setting("constraints", c.to_json())
     return {"ok": True, "mode": "real"}
-
-
-@app.post("/api/go-paper")
-def go_paper():
-    c = load_constraints(db)
-    c.paper_trading = True
-    db.set_setting("constraints", c.to_json())
-    return {"ok": True, "mode": "paper"}
 
 
 # ---------- on-chain wallet (Mode B) ----------
@@ -651,16 +640,6 @@ def resume():
     c.emergency_stopped = False
     c.trading_paused = False
     db.set_setting("constraints", c.to_json())
-    return {"ok": True}
-
-
-@app.post("/api/reset-paper")
-def reset_paper():
-    """Reset the paper portfolio to the starting capital."""
-    for p in db.get_positions():
-        db.delete_position(p["asset"])
-    c = load_constraints(db)
-    db.set_cash(c.starting_capital_usd)
     return {"ok": True}
 
 

@@ -315,6 +315,44 @@ class DecisionEngine:
         threshold = getattr(c, "per_position_stop_pct", None) or 0
         if threshold <= 0:
             return []
+        # demo mode: positions are non-gas demo rows with a cost basis
+        if getattr(self.db, "demo_mode_percent", False):
+            from .demowallet import DemoWallet
+            demo = DemoWallet(self.db)
+            sold = []
+            for r in demo.rows():
+                if r["is_gas"] or r["balance"] <= 0 or r["cost_basis_usd"] <= 0:
+                    continue
+                price = prices.get(r["asset"].upper(), 0.0)
+                if price <= 0 and r.get("contract"):
+                    try:
+                        addr_p = self.market.get_prices_for_addresses([r["contract"]])
+                        price = addr_p.get(r["contract"].lower(), 0.0)
+                    except Exception:
+                        pass
+                if price <= 0:
+                    continue
+                value = r["balance"] * price
+                dd = (value - r["cost_basis_usd"]) / r["cost_basis_usd"] * 100
+                if dd > -threshold:
+                    continue
+                action = {"type": "sell", "asset": r["asset"],
+                          "_contract": r.get("contract", ""),
+                          "amount": r["balance"],
+                          "amount_or_percent": r["balance"],
+                          "reason": (f"automatic stop-loss: position {dd:.1f}% "
+                                     f"below cost (limit {threshold:.0f}%)")}
+                self.db.set_setting("last_cycle_id", cycle_id)
+                err = self._execute(cycle_id, action, prices)
+                if err is None:
+                    sold.append(r["asset"])
+                else:
+                    self.db.add_decision({
+                        "cycle_id": cycle_id, "action": "sell", "asset_in": r["asset"],
+                        "status": "failed",
+                        "reason": f"Stop-loss sell failed: {err}",
+                    })
+            return sold
         sold = []
         for p in list(self.db.get_positions()):
             asset = p["asset"]

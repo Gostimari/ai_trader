@@ -289,9 +289,9 @@ class _FakeMarket:
 class TestSettings:
     def test_settings_roundtrip_and_defaults(self, db):
         c = load_constraints(db)
-        assert c.max_loss_pct == 20.0
+        # app-facing defaults after migration
+        assert c.live_execution_mode == "demo"
         assert c.autonomy_mode == "constrained"
-        assert c.paper_trading is True
         c.custom_prompt = "be careful"
         db.set_setting("constraints", c.to_json())
         c2 = load_constraints(db)
@@ -378,11 +378,13 @@ class TestLiveModeGate:
         from fastapi.testclient import TestClient
         monkeypatch.setattr(srv, "db", db)
         c = TestClient(srv.app)
-        body = {"max_loss_pct": 20, "paper_trading": False}
+        # real mode can only be entered via /api/go-live, never via the
+        # generic constraints save (which defaults to demo in the app)
+        body = {"max_loss_pct": 20, "paper_trading": False,
+                "live_execution_mode": "onchain"}
         r = c.post("/api/constraints", json=body)
         assert r.status_code == 400
         assert "go-live" in r.json()["detail"]
-        assert load_constraints(db).paper_trading is True
 
     def test_go_live_requires_imported_wallet(self, db, monkeypatch):
         import app.server as srv
@@ -394,7 +396,7 @@ class TestLiveModeGate:
         assert r.status_code == 400
         assert "No wallet imported" in r.json()["detail"]
 
-    def test_go_live_then_paper_with_wallet(self, db, monkeypatch):
+    def test_go_live_then_back_to_demo(self, db, monkeypatch):
         import app.server as srv
         from fastapi.testclient import TestClient
         monkeypatch.setattr(srv, "db", db)
@@ -404,8 +406,10 @@ class TestLiveModeGate:
         assert r.status_code == 200 and r.json()["mode"] == "real"
         cc = load_constraints(db)
         assert cc.paper_trading is False and cc.live_execution_mode == "onchain"
-        r = c.post("/api/go-paper")
-        assert r.status_code == 200 and load_constraints(db).paper_trading is True
+        r = c.post("/api/go-demo")
+        assert r.status_code == 200
+        cc = load_constraints(db)
+        assert cc.live_execution_mode == "demo"
 
 
 class TestLiveExecutor:
@@ -724,7 +728,8 @@ class TestEvmMultiChainImport:
         html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
         assert "secrets-form" not in html
         assert "Live Trading (Phase 2)" not in html
-        assert "btn-mode-paper" in html and "btn-mode-real" in html
+        assert "btn-mode-demo" in html and "btn-mode-real" in html
+        assert "Paper money" not in html  # paper mode is gone from the UI
 
 
 class TestUserTestGaps:
@@ -1883,14 +1888,14 @@ class TestDemoWallet:
 
 
 class TestModeAwarePortfolio:
-    def test_paper_mode_shows_paper_portfolio(self, db, monkeypatch):
+    def test_demo_mode_default_shows_demo_wallet(self, db, monkeypatch):
         import app.server as srv
         from fastapi.testclient import TestClient
         monkeypatch.setattr(srv, "db", db)
         c = TestClient(srv.app)
         s = c.get("/api/state").json()
-        assert s["mode"] == "paper"
-        assert "portfolio" in s and s["wallet_view"] is None
+        assert s["mode"] == "demo"
+        assert "wallet_view" in s
 
     def test_demo_mode_shows_demo_wallet(self, db, monkeypatch):
         import app.server as srv
@@ -2268,4 +2273,61 @@ class TestDemoPercentResolution:
         assert len(result["executed"]) == 1, result
         brett = db.demo_get("base", "BRETT", BRETT_C)
         assert brett and brett["balance"] > 0
+        db.demo_clear()
+
+
+class TestTwoModeWorld:
+    def test_default_mode_is_demo(self, db):
+        from memicoin_core.settings import load_constraints
+        c = load_constraints(db)
+        assert c.paper_trading is False  # migrated away from the class default
+        assert c.live_execution_mode == "demo"
+
+    def test_legacy_paper_setting_migrated_to_demo(self, db):
+        from memicoin_core.settings import load_constraints, Constraints
+        legacy = Constraints(paper_trading=True)
+        db.set_setting("constraints", legacy.to_json())
+        c = load_constraints(db)
+        assert c.paper_trading is False and c.live_execution_mode == "demo"
+
+    def test_demo_cost_basis_tracked_on_buy(self, db):
+        from memicoin_core.demowallet import DemoWallet
+        d = DemoWallet(db)
+        db.demo_set("base", "ETH", 0.01, is_gas=True)
+        db.demo_set("base", "USDC", 100.0)
+        ok, _ = d.swap("base", "USDC", "", "BRETT", "0xabc",
+                       50.0, price_from=1.0, price_to=0.006)
+        assert ok
+        row = db.demo_get("base", "BRETT", "0xabc")
+        assert row["cost_basis_usd"] == pytest.approx(50.0)  # what was paid
+        # sell half: basis scales down proportionally
+        ok, _ = d.swap("base", "BRETT", "0xabc", "USDC", "",
+                       row["balance"] / 2, price_from=0.006, price_to=1.0)
+        row2 = db.demo_get("base", "BRETT", "0xabc")
+        assert row2["cost_basis_usd"] == pytest.approx(25.0)
+        db.demo_clear()
+
+    def test_demo_stop_loss_fires_on_losing_position(self, db, monkeypatch):
+        BRETT_C = "0x532f27101965dd16442E59d40670FaF5eBB142E4"
+        c = Constraints(paper_trading=False, live_execution_mode="demo",
+                        per_position_stop_pct=20.0)
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        db.demo_mode_percent = True
+        # bought at $0.006 (basis $60), now worth $0.004 -> -33%
+        db.demo_set("base", "BRETT", 10000.0, contract=BRETT_C, cost_basis_usd=60.0)
+        db.demo_set("base", "ETH", 0.01, is_gas=True)
+        prices = {"BRETT": 0.004, "ETH": 2500.0, "USDC": 1.0}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_asset_map",
+                            lambda force=False: {"BRETT": {"asset": "BRETT", "chain": "base",
+                                                           "contract": BRETT_C}})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: json.dumps({
+            "analysis_summary": "h", "actions": [], "confidence": "low"}))
+        engine.run_cycle()
+        d = db.list_decisions()
+        stops = [x for x in d if "stop-loss" in (x.get("reason") or "")]
+        assert stops, "stop-loss should have fired"
+        assert stops[0]["status"] == "executed"
+        assert db.demo_get("base", "BRETT", BRETT_C)["balance"] == pytest.approx(0.0)
+        db.demo_mode_percent = False
         db.demo_clear()

@@ -34,6 +34,11 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._migrate()
+        # lightweight migration: demo_wallet.cost_basis_usd (added later
+        # than the original schema; runs after tables exist)
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(demo_wallet)")]
+        if "cost_basis_usd" not in cols:
+            self.conn.execute("ALTER TABLE demo_wallet ADD COLUMN cost_basis_usd REAL DEFAULT 0")
 
     def _migrate(self) -> None:
         cur = self.conn
@@ -92,6 +97,7 @@ class Database:
                 contract TEXT DEFAULT '',
                 balance REAL NOT NULL DEFAULT 0,
                 is_gas INTEGER NOT NULL DEFAULT 0,
+                cost_basis_usd REAL DEFAULT 0,
                 UNIQUE(chain, asset, contract)
             );
             """
@@ -228,33 +234,47 @@ class Database:
         return dict(row) if row else None
 
     def demo_set(self, chain: str, asset: str, balance: float,
-                 contract: str = "", is_gas: bool = False) -> None:
+                 contract: str = "", is_gas: bool = False,
+                 cost_basis_usd: float | None = None) -> None:
         with _lock:
             self.conn.execute(
-                "INSERT INTO demo_wallet (id, chain, asset, contract, balance, is_gas) "
-                "VALUES (?,?,?,?,?,?) ON CONFLICT(chain, asset, contract) DO UPDATE SET "
-                "balance=excluded.balance, is_gas=excluded.is_gas",
-                (new_id(), chain, asset, contract, balance, 1 if is_gas else 0),
+                "INSERT INTO demo_wallet (id, chain, asset, contract, balance, is_gas, cost_basis_usd) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(chain, asset, contract) DO UPDATE SET "
+                "balance=excluded.balance, is_gas=excluded.is_gas, "
+                "cost_basis_usd=COALESCE(excluded.cost_basis_usd, demo_wallet.cost_basis_usd)",
+                (new_id(), chain, asset, contract, balance, 1 if is_gas else 0,
+                 cost_basis_usd if cost_basis_usd is not None else balance),
             )
             self.conn.commit()
 
     def demo_adjust(self, chain: str, asset: str, delta: float,
-                    contract: str = "", is_gas: bool = False) -> float:
+                    contract: str = "", is_gas: bool = False,
+                    usd_value: float = 0.0) -> float:
         """Add delta to a demo balance (can be negative); creates at 0 if new.
+        usd_value: the USD value of the delta, tracked for cost basis.
         Returns the new balance. Refuses to go below 0 (returns old)."""
         with _lock:
             row = self.conn.execute(
-                "SELECT balance FROM demo_wallet WHERE chain=? AND asset=? AND contract=?",
+                "SELECT balance, cost_basis_usd FROM demo_wallet "
+                "WHERE chain=? AND asset=? AND contract=?",
                 (chain, asset, contract)).fetchone()
             cur = row["balance"] if row else 0.0
+            cur_basis = row["cost_basis_usd"] if row else 0.0
             new = cur + delta
             if new < 0:
                 return cur  # insufficient: caller checks
+            # cost basis: buying adds USD value; selling removes proportionally
+            if delta > 0:
+                new_basis = cur_basis + usd_value
+            elif cur > 0:
+                new_basis = cur_basis * (new / cur)
+            else:
+                new_basis = 0.0
             self.conn.execute(
-                "INSERT INTO demo_wallet (id, chain, asset, contract, balance, is_gas) "
-                "VALUES (?,?,?,?,?,?) ON CONFLICT(chain, asset, contract) DO UPDATE SET "
-                "balance=excluded.balance",
-                (new_id(), chain, asset, contract, new, 1 if is_gas else 0),
+                "INSERT INTO demo_wallet (id, chain, asset, contract, balance, is_gas, cost_basis_usd) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(chain, asset, contract) DO UPDATE SET "
+                "balance=excluded.balance, cost_basis_usd=excluded.cost_basis_usd",
+                (new_id(), chain, asset, contract, new, 1 if is_gas else 0, new_basis),
             )
             self.conn.commit()
             return new

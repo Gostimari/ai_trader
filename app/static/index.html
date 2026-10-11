@@ -40,7 +40,6 @@
       <button id="btn-pause">⏸ Pause/Resume</button>
       <button id="btn-emergency" class="danger">🛑 Emergency stop</button>
       <button id="btn-stable" class="danger">💵 Convert all to USDC (per chain)</button>
-      <button id="btn-reset">↺ Reset paper portfolio</button>
       <button id="btn-resume" class="hidden">Re-enable trading</button>
     </div>
     <div id="cycle-result"></div>
@@ -58,10 +57,10 @@
 
     <h3>1 · Trading Mode</h3>
     <div class="mode-switch">
-      <button id="btn-mode-paper" class="mode-btn active">📝 Paper money (virtual $100)</button>
-      <button id="btn-mode-real" class="mode-btn danger">💰 Real money (my wallet)</button>
+      <button id="btn-mode-demo" class="mode-btn active">🧪 Wallet Demo</button>
+      <button id="btn-mode-real" class="mode-btn danger">💰 Real Money</button>
     </div>
-    <p class="hint" id="mode-hint">Paper mode: the AI trades against real market data with virtual funds. No risk.</p>
+    <p class="hint" id="mode-hint">Demo mode: the AI trades your demo wallet with real prices, real gas costs, all constraints — simulated settlement.</p>
     <div id="real-mode-warning" class="warning hidden">
       ⚠️ REAL MONEY MODE: the AI will trade the imported wallet's actual funds on DEXs.
       Your constraints (max loss, position limits, allowed chains) still apply and are enforced in code,

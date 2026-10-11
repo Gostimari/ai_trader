@@ -97,9 +97,11 @@ class DemoWallet:
                                       is_gas=True)
         if abs(new_gas - self.gas_balance(chain)) < 1e-12 and new_gas < gas_cost:
             return False, f"gas deduction failed on {chain}"
-        # deduct sold asset, credit bought asset
-        self.db.demo_adjust(chain, from_asset, -from_amount, from_contract)
-        self.db.demo_adjust(chain, to_asset, bought, to_contract)
+        # deduct sold asset, credit bought asset (cost-basis tracked)
+        self.db.demo_adjust(chain, from_asset, -from_amount, from_contract,
+                            usd_value=usd)
+        self.db.demo_adjust(chain, to_asset, bought, to_contract,
+                            usd_value=usd)
         return True, (f"swapped {from_amount} {from_asset} -> {bought:.6f} {to_asset} "
                       f"(${usd:.2f} at real prices); gas {gas_cost}")
 

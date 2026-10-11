@@ -59,17 +59,10 @@ function renderWalletPortfolio(w, mode) {
 async function loadState() {
   try {
     const s = await api("/api/state");
-    const mode = s.mode || "paper";
-    $("#mode-badge").textContent = mode === "paper" ? "PAPER TRADING"
-      : mode === "demo" ? "DEMO WALLET" : "LIVE TRADING";
-    $("#mode-badge").classList.toggle("live", mode !== "paper");
-    if (mode === "paper") {
-      renderPaperPortfolio(s.portfolio);
-      $("#btn-reset").classList.remove("hidden");
-    } else {
-      renderWalletPortfolio(s.wallet_view, mode);
-      $("#btn-reset").classList.add("hidden");
-    }
+    const mode = s.mode || "demo";
+    $("#mode-badge").textContent = mode === "demo" ? "DEMO WALLET" : "LIVE TRADING";
+    $("#mode-badge").classList.toggle("live", mode === "real");
+    renderWalletPortfolio(s.wallet_view, mode);
     const badges = [];
     if (s.trading_paused) badges.push("\u23f8 PAUSED");
     if (s.emergency_stopped) badges.push("\ud83d\uded1 EMERGENCY STOP");
@@ -151,9 +144,6 @@ function controls() {
     btn.disabled = false;
     btn.textContent = "\ud83d\udcb5 Convert all to USDC (per chain)";
     loadState(); loadDecisions();
-  });
-  $("#btn-reset").addEventListener("click", async () => {
-    if (confirm("Reset paper portfolio to starting capital?")) { await api("/api/reset-paper", {}); loadState(); loadDecisions(); }
   });
   $("#btn-resume").addEventListener("click", async () => {
     if (confirm("Re-enable trading after emergency stop/pause?")) { await api("/api/resume", {}); loadState(); }
@@ -305,18 +295,20 @@ function walletControls() {
 
 async function refreshModeUI() {
   const s = await api("/api/state");
-  const paper = s.paper_trading;
-  $("#btn-mode-paper").classList.toggle("active", paper);
-  $("#btn-mode-real").classList.toggle("active", !paper);
-  $("#real-mode-warning").classList.toggle("hidden", paper);
-  $("#mode-hint").textContent = paper
-    ? "Paper mode: the AI trades against real market data with virtual funds. No risk."
-    : "Real money mode: the AI trades your imported wallet's funds on DEXs. Constraints still enforced in code.";
+  const mode = s.mode || "demo";
+  $("#btn-mode-demo").classList.toggle("active", mode === "demo");
+  $("#btn-mode-real").classList.toggle("active", mode === "real");
+  $("#real-mode-warning").classList.toggle("hidden", mode !== "real");
+  $("#mode-hint").textContent = mode === "demo"
+    ? "Demo mode: the AI trades your demo wallet with real prices and constraints \u2014 simulated settlement, nothing real moves."
+    : "REAL MONEY mode: the AI trades your imported wallet's actual funds on-chain. Constraints enforced in code; swaps are irreversible.";
 }
 
 function modeControls() {
-  $("#btn-mode-paper").addEventListener("click", async () => {
-    await api("/api/go-paper", {});
+  $("#btn-mode-demo").addEventListener("click", async () => {
+    if (!confirm("Switch to WALLET DEMO mode? Trades settle against your demo balances (Settings 3c) — nothing real is moved.")) return;
+    try { await api("/api/go-demo", {}); }
+    catch (e) { return alert("Failed: " + e.message); }
     refreshModeUI();
   });
   $("#btn-mode-real").addEventListener("click", async () => {
