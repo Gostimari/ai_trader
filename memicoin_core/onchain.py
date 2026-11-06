@@ -63,6 +63,26 @@ EVM_CHAINS = {
         "explorer": "https://explorer.arc.io/tx/",
         "native_symbol": "USDC",
     },
+    # Testnet chains (testnet: True): the ONLY safe place to verify real
+    # transaction flows before enabling mainnet. CCTP domains mirror the
+    # mainnets (sepolia=0, base-sepolia=6) but the V2 contracts are
+    # DIFFERENT deployments - see memicoin_core/bridge.py.
+    "sepolia": {
+        "chain_id": 11155111,
+        "rpc": "https://ethereum-sepolia-rpc.publicnode.com",
+        "router": None,
+        "weth": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
+        "explorer": "https://sepolia.etherscan.io/tx/",
+        "testnet": True,
+    },
+    "base-sepolia": {
+        "chain_id": 84532,
+        "rpc": "https://sepolia.base.org",
+        "router": None,
+        "weth": "0x4200000000000000000000000000000000000006",
+        "explorer": "https://sepolia.basescan.org/tx/",
+        "testnet": True,
+    },
 }
 
 SOLANA = {
@@ -452,6 +472,9 @@ USDC_ADDRESSES = {
     "ethereum": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
     "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "polygon": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+    # Circle testnet USDC (faucet.circle.com; 6 decimals like mainnet)
+    "sepolia": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+    "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 }
 # Arc: USDC is the native gas token — no contract needed.
 # BSC: no Circle-native USDC deployment; liquidation there falls back to

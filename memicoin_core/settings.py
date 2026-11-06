@@ -48,6 +48,14 @@ class Constraints(BaseModel):
                     "The swap reverts on-chain if the received amount is "
                     "below the expected amount minus this tolerance.",
     )
+    onchain_testnet: bool = Field(
+        default=False,
+        description="Testnet mode: real transactions run on Sepolia / Base "
+                    "Sepolia with faucet tokens (no real funds). Use this to "
+                    "verify the on-chain and bridge flows before enabling "
+                    "mainnet. Mainnet chains are refused while ON, and "
+                    "testnet chains are refused while OFF.",
+    )
     autonomy_mode: AutonomyMode = "constrained"
     custom_prompt: str = Field(
         default="", description="Behavioral instructions the AI reads before every decision."

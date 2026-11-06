@@ -476,12 +476,16 @@ class DecisionEngine:
         parts.append(f"## Portfolio state\n{json.dumps(portfolio, indent=2)}")
         solana_key = "yes" if (self._onchain_secrets is not None and
                                self._onchain_secrets.has("onchain_solana_private_key")) else "NO"
-        from .bridge import CCTP_DOMAINS
+        from .bridge import CCTP_DOMAINS, is_testnet_chain
+        bridgeable = [ch for ch in CCTP_DOMAINS
+                      if is_testnet_chain(ch) == c.onchain_testnet]
         parts.append(
             "## Wallet capabilities\n"
             f"- Solana key imported: {solana_key} "
             f"({'Solana assets allowed' if solana_key == 'yes' else 'do NOT propose Solana assets'})\n"
-            f"- CCTP-bridgeable USDC chains: {', '.join(CCTP_DOMAINS)} (bridge action available)")
+            f"- CCTP-bridgeable USDC chains: {', '.join(bridgeable)} (bridge action available)"
+            + ("" if c.onchain_testnet else
+               "\n- Testnet mode is OFF: never propose sepolia/base-sepolia bridges or assets"))
         # gas reserves: what's investable per chain (real mode only)
         if not self.constraints.paper_trading and self._onchain_secrets is not None \
                 and self._onchain_secrets.has("onchain_private_key"):
@@ -489,6 +493,8 @@ class DecisionEngine:
                 from .onchain import EVMWallet, EVM_CHAINS
                 lines = []
                 for chain in EVM_CHAINS:
+                    if EVM_CHAINS[chain].get("testnet") and not self.constraints.onchain_testnet:
+                        continue  # testnet RPCs only in testnet mode
                     try:
                         w = EVMWallet(self._onchain_secrets, chain)
                         lines.append(
@@ -609,6 +615,22 @@ class DecisionEngine:
         # resolve the amount against the SOURCE chain's USDC balance
         # (percentages of the whole portfolio make no sense for a bridge:
         # only what sits on src can move)
+        # network gate: testnet chains only in testnet mode, mainnet chains
+        # only with testnet OFF (a 'test' bridge must never burn real USDC
+        # and a real bridge must never burn faucet tokens)
+        from .bridge import is_testnet_chain
+        want_testnet = self.constraints.onchain_testnet
+        for ch in (src, dst):
+            if is_testnet_chain(ch) != want_testnet:
+                self.db.add_decision({
+                    "cycle_id": cycle_id, "action": "bridge", "status": "rejected",
+                    "reason": (f"Bridge {src}->{dst} rejected: "
+                               + ("testnet mode is ON - only sepolia/base-sepolia "
+                                  "bridges are allowed" if want_testnet else
+                                  "testnet mode is OFF - enable it to bridge on "
+                                  "sepolia/base-sepolia")
+                               + f". {reason}")})
+                return
         is_pct = isinstance(amt_raw, str) and amt_raw.strip().endswith("%")
         try:
             val = float(str(amt_raw).rstrip("%"))
@@ -880,6 +902,14 @@ class DecisionEngine:
         from .onchain import EVM_CHAINS, wallet_for
         prices = prices or {}
         chain = self.constraints.onchain_chain
+        # network gate: swaps must run on the network matching the toggle
+        # (sepolia/base-sepolia only in testnet mode; mainnet chains only
+        # with testnet OFF - no solana devnet support exists)
+        chain_is_testnet = EVM_CHAINS.get(chain, {}).get("testnet", False)
+        if chain_is_testnet != self.constraints.onchain_testnet:
+            return (f"{'testnet mode is ON' if self.constraints.onchain_testnet else 'testnet mode is OFF'}: "
+                    f"swaps on {chain} are refused while the toggle disagrees "
+                    f"(use {'sepolia or base-sepolia' if self.constraints.onchain_testnet else 'a mainnet chain'})")
         # SAFETY FIRST: the asset identifier must be a contract/mint address
         # before anything else (including gas checks) runs.
         token = action["asset"]

@@ -93,6 +93,7 @@
         <input type="number" id="min_trade_usd" step="0.5" min="0" value="1"></label>
       <label>Max slippage on on-chain swaps % (swap reverts if the price moves more than this)
         <input type="number" id="onchain_slippage_pct" step="0.5" min="0" max="50" value="5"></label>
+      <label><input type="checkbox" id="onchain_testnet"> Testnet mode (verify on Sepolia / Base Sepolia first — faucet tokens only, no real funds)</label>
       <label>Risk appetite (influences how the AI writes its plan)
         <select id="risk_profile">
           <option value="safe">Safe — prioritize capital preservation</option>

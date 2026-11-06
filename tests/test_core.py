@@ -2937,3 +2937,68 @@ class TestSlippageBound:
         # amountOutMin = 0.9 * 10**18, NOT 1
         assert captured["name"] == "swapExactTokensForTokens"
         assert captured["args"][1] == int(0.9 * 10 ** 18)
+
+
+class TestTestnetMode:
+    """Testnet toggle: chains, network separation, settings roundtrip."""
+
+    def test_testnet_disabled_by_default(self):
+        assert Constraints().onchain_testnet is False
+
+    def test_settings_roundtrip_keeps_testnet_flag(self, db):
+        c = load_constraints(db)
+        c.onchain_testnet = True
+        c.onchain_chain = "base-sepolia"
+        db.set_setting("constraints", c.to_json())
+        c2 = load_constraints(db)
+        assert c2.onchain_testnet is True
+        assert c2.onchain_chain == "base-sepolia"
+
+    def test_bridge_supported_testnet_pair_only(self):
+        from memicoin_core.bridge import bridge_supported
+        assert bridge_supported("sepolia", "base-sepolia")
+        assert not bridge_supported("sepolia", "arc")          # mixed network
+        assert not bridge_supported("ethereum", "sepolia")     # mixed network
+        assert not bridge_supported("base-sepolia", "arc")     # mixed network
+
+    def test_iris_endpoints(self):
+        from memicoin_core.bridge import iris_base_for
+        assert iris_base_for("sepolia").startswith("https://iris-api-sandbox")
+        assert iris_base_for("base").startswith("https://iris-api")
+
+    def test_testnet_usdc_addresses(self):
+        from memicoin_core.onchain import USDC_ADDRESSES
+        assert USDC_ADDRESSES["sepolia"] == "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+        assert USDC_ADDRESSES["base-sepolia"] == "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+    def test_engine_rejects_mainnet_bridge_in_testnet_mode(self, db, monkeypatch):
+        c = Constraints(paper_trading=True, onchain_testnet=True,
+                        allowed_chains=["sepolia", "base-sepolia"])
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        ai_out = json.dumps({
+            "analysis_summary": "bridge to base (mainnet!)",
+            "actions": [{"type": "bridge", "from_chain": "sepolia",
+                         "to_chain": "base", "amount_or_percent": 50,
+                         "reason": "mainnet opportunity"}],
+            "confidence": "medium"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        engine.run_cycle()
+        d = db.list_decisions()[0]
+        assert d["action"] == "bridge" and d["status"] == "rejected"
+        assert "testnet mode is ON" in d["reason"]
+
+    def test_engine_rejects_testnet_bridge_when_testnet_off(self, db, monkeypatch):
+        c = Constraints(paper_trading=True, onchain_testnet=False,
+                        allowed_chains=["sepolia", "base-sepolia"])
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        ai_out = json.dumps({
+            "analysis_summary": "bridge on testnet",
+            "actions": [{"type": "bridge", "from_chain": "sepolia",
+                         "to_chain": "base-sepolia", "amount_or_percent": 50,
+                         "reason": "testnet verification"}],
+            "confidence": "medium"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        engine.run_cycle()
+        d = db.list_decisions()[0]
+        assert d["action"] == "bridge" and d["status"] == "rejected"
+        assert "testnet mode is OFF" in d["reason"]

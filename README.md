@@ -51,6 +51,38 @@ pytest
 - Every decision cycle stores the exact input sent to the AI and its full output (auditability).
 - **Disclaimer:** meme coins are extremely volatile. This software does not guarantee profit.
 
+## Testnet verification (do this before enabling mainnet)
+
+The unit tests mock the blockchain RPC and Circle's attestation API, so they
+prove the logic but not the live contract calls. Run ONE real bridge on
+testnet to fully verify the on-chain + bridge stack with zero real funds:
+
+1. **Get a throwaway key.** Create a fresh wallet (any wallet app) and import
+   its private key in the dashboard (section 3). NEVER reuse a mainnet key.
+2. **Get faucet tokens:**
+   - Testnet USDC: [faucet.circle.com](https://faucet.circle.com) - claim on
+     **Ethereum Sepolia** AND **Base Sepolia** (20 USDC per chain every 2h,
+     no account needed).
+   - Gas: Sepolia ETH from a public faucet (e.g. the Coinbase Developer
+     Platform faucet dispenses both ETH and USDC on Sepolia and Base Sepolia).
+3. **Configure the app (Settings):**
+   - Enable **Testnet mode**.
+   - Add `sepolia, base-sepolia` to **Allowed blockchains**.
+   - Switch Trading Mode to **Real Money** (transactions are real, but on
+     testnets - the funds are worthless faucet tokens).
+4. **Run a decision cycle** (or propose a bridge action) moving USDC from
+   `sepolia` to `base-sepolia`. The decision feed shows: burn tx on Sepolia
+   -> attestation from Circle's sandbox Iris API -> mint tx on Base Sepolia.
+   If the attestation is slow, the bridge is saved as pending and the mint
+   completes automatically at the start of the next cycle.
+5. Once the round-trip works (USDC arrives on Base Sepolia), disable Testnet
+   mode for mainnet. Testnet chains are refused while OFF, mainnet chains are
+   refused while ON - the two networks can never be mixed.
+
+RPC endpoints can be overridden per chain via `MEMICOIN_RPC_<CHAIN>` (e.g.
+`MEMICOIN_RPC_SEPOLIA`), and the CCTP attestation timeout via
+`MEMICOIN_CCTP_TIMEOUT` (seconds, default 900).
+
 ## Configuration
 
 See the Settings section in the dashboard, or `.env` for API keys. All settings persist in the local SQLite database as versioned JSON.

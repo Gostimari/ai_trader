@@ -26,18 +26,48 @@ from .onchain import EVMWallet, USDC_ADDRESSES
 
 log = logging.getLogger("memicoin.bridge")
 
-# CCTP V2 domains (Circle docs)
+# CCTP V2 domains (Circle docs). Testnet chains share the mainnet domain
+# IDs (sepolia=ethereum's 0, base-sepolia=base's 6).
 CCTP_DOMAINS = {
     "ethereum": 0,
     "base": 6,
     "polygon": 7,
     "arc": 26,
+    "sepolia": 0,
+    "base-sepolia": 6,
 }
 
-# Circle deploys the SAME canonical V2 contracts on every supported chain
-# (verified: ethereum 0, base 6, polygon 7, arc 26).
+# Testnet chains: verify flows here BEFORE enabling mainnet. Cross-network
+# bridges (mainnet <-> testnet) are refused - the USDC would never mint.
+TESTNET_CHAINS = {"sepolia", "base-sepolia"}
+
+# Circle deploys the SAME canonical V2 contracts on every chain of a given
+# network (verified: ethereum 0, base 6, polygon 7, arc 26; sepolia +
+# base-sepolia share the testnet deployments).
 TOKEN_MESSENGER_V2 = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
 MESSAGE_TRANSMITTER_V2 = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+TOKEN_MESSENGER_V2_TESTNET = "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA"
+MESSAGE_TRANSMITTER_V2_TESTNET = "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275"
+
+IRIS_MAINNET = "https://iris-api.circle.com"
+IRIS_SANDBOX = "https://iris-api-sandbox.circle.com"
+
+
+def is_testnet_chain(chain: str) -> bool:
+    return chain in TESTNET_CHAINS
+
+
+def messenger_for(chain: str) -> str:
+    return TOKEN_MESSENGER_V2_TESTNET if is_testnet_chain(chain) else TOKEN_MESSENGER_V2
+
+
+def transmitter_for(chain: str) -> str:
+    return (MESSAGE_TRANSMITTER_V2_TESTNET if is_testnet_chain(chain)
+            else MESSAGE_TRANSMITTER_V2)
+
+
+def iris_base_for(chain: str) -> str:
+    return IRIS_SANDBOX if is_testnet_chain(chain) else IRIS_MAINNET
 
 # Arc quirk: USDC is the native gas token there, so CCTP burns a dedicated
 # burn-token contract instead of an ERC-20 USDC address (docs.arc.io).
@@ -46,8 +76,6 @@ ARC_CCTP_BURN_TOKEN = "0x3600000000000000000000000000000000000000"
 # event MessageSent(bytes) topic0 - carries the message bytes needed for
 # attestation + mint.
 MESSAGE_SENT_TOPIC0 = "0x2fa9ca894982930190727e75500a97d8dc500233a5065e0f3126c48fbe0343c0"
-
-IRIS_URL = "https://iris-api.circle.com/v2/attestations/{message_hash}"
 
 # Arc's eth_estimateGas can return null for depositForBurn; fall back to a
 # generous explicit gas limit instead of failing the bridge.
@@ -100,9 +128,13 @@ def burn_token_for(chain: str) -> str | None:
 
 
 def bridge_supported(src_chain: str, dst_chain: str) -> bool:
-    return (src_chain in CCTP_DOMAINS and dst_chain in CCTP_DOMAINS
-            and burn_token_for(src_chain) is not None
-            and burn_token_for(dst_chain) is not None)
+    both_known = (src_chain in CCTP_DOMAINS and dst_chain in CCTP_DOMAINS
+                  and burn_token_for(src_chain) is not None
+                  and burn_token_for(dst_chain) is not None)
+    # never mix networks: testnet USDC burned on mainnet (or vice versa)
+    # would mint nothing
+    same_network = (is_testnet_chain(src_chain) == is_testnet_chain(dst_chain))
+    return bool(both_known and same_network)
 
 
 def _cctp_timeout() -> float:
@@ -163,11 +195,12 @@ def _extract_message_sent(receipt) -> bytes | None:
 
 
 def _fetch_attestation(message_hash: str, timeout_s: float,
-                       poll_interval_s: float) -> str | None:
+                       poll_interval_s: float,
+                       iris_base: str = IRIS_MAINNET) -> str | None:
     """Poll Circle Iris until the attestation is complete. Returns the
     attestation signature (hex string) or None on timeout."""
     import requests
-    url = IRIS_URL.format(message_hash=message_hash)
+    url = f"{iris_base}/v2/attestations/{message_hash}"
     deadline = time.time() + timeout_s
     while True:
         try:
@@ -194,7 +227,7 @@ def _mint_on_destination(secrets, dst_chain: str, message_bytes: bytes,
     if not w.configured():
         raise RuntimeError("EVM wallet key not imported")
     contract = w.w3.eth.contract(
-        address=w.w3.to_checksum_address(MESSAGE_TRANSMITTER_V2),
+        address=w.w3.to_checksum_address(transmitter_for(dst_chain)),
         abi=RECEIVE_MESSAGE_ABI)
     att = attestation[2:] if attestation.startswith("0x") else attestation
     data = contract.encode_abi("receiveMessage", args=[
@@ -226,10 +259,11 @@ def bridge_usdc(secrets, src_chain: str, dst_chain: str, amount: float,
         return BridgeResult(False, error="EVM wallet key not imported")
     try:
         raw_amount = int(round(amount * 10 ** 6))  # USDC: 6 decimals on EVM
-        w.erc20_approve_if_needed(burn_token, TOKEN_MESSENGER_V2, raw_amount)
+        messenger = messenger_for(src_chain)
+        w.erc20_approve_if_needed(burn_token, messenger, raw_amount)
         mint_recipient = bytes.fromhex(w.address()[2:].rjust(64, "0"))
         contract = w.w3.eth.contract(
-            address=w.w3.to_checksum_address(TOKEN_MESSENGER_V2),
+            address=w.w3.to_checksum_address(messenger),
             abi=DEPOSIT_FOR_BURN_ABI)
         data = contract.encode_abi("depositForBurn", args=[
             raw_amount,
@@ -240,7 +274,7 @@ def bridge_usdc(secrets, src_chain: str, dst_chain: str, amount: float,
             0,  # maxFee in burn-token units; 0 = standard (no fast-fee premium)
             _min_finality_threshold(src_chain),
         ])
-        burn_tx = _send_with_fallback_gas(w, TOKEN_MESSENGER_V2, data)
+        burn_tx = _send_with_fallback_gas(w, messenger, data)
         receipt = w.w3.eth.get_transaction_receipt(
             burn_tx if burn_tx.startswith("0x") else "0x" + burn_tx)
         message = _extract_message_sent(receipt)
@@ -254,7 +288,8 @@ def bridge_usdc(secrets, src_chain: str, dst_chain: str, amount: float,
         msg_hash = "0x" + w.w3.keccak(message).hex()
         timeout_s = (_cctp_timeout() if attestation_timeout_s is None
                      else attestation_timeout_s)
-        att = _fetch_attestation(msg_hash, timeout_s, poll_interval_s)
+        att = _fetch_attestation(msg_hash, timeout_s, poll_interval_s,
+                                 iris_base=iris_base_for(src_chain))
         if att is None:
             return BridgeResult(
                 False, tx_id=burn_tx, pending=True,
