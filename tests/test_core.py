@@ -1613,13 +1613,13 @@ class TestBridgeAction:
         assert result["status"] == "invalid"  # schema safety net
         assert db.get_cash() == pytest.approx(100.0)
 
-    def test_bridge_unverified_pair_refused_honestly(self, db, monkeypatch):
+    def test_bridge_unsupported_pair_refused_honestly(self, db, monkeypatch):
         from memicoin_core.bridge import bridge_usdc
         class _Store:
             def has(self, k): return k == "onchain_private_key"
             def get(self, k): return "0x" + "1" * 64
-        res = bridge_usdc(_Store(), "base", "arc", 5.0)
-        assert not res.ok and "not enabled" in res.error
+        res = bridge_usdc(_Store(), "binance-smart-chain", "arc", 5.0)
+        assert not res.ok and "not supported" in res.error
 
     def test_wallet_capabilities_in_prompt(self, db, monkeypatch):
         db.set_cash(100.0)
@@ -2816,3 +2816,124 @@ class TestDemoSizingAndSells:
         r = v.validate_action({"type": "sell", "asset": "DOGE",
                                "amount_or_percent": 150}, PRICES, ASSETS)
         assert not r.ok and "exceeds holdings" in r.reason
+
+
+class TestPendingBridges:
+    def test_pending_bridge_roundtrip(self, db):
+        mh = "0x" + "ab" * 32
+        mb = "1234abcd"
+        pid = db.add_pending_bridge("base", "arc", 25.0, mh, mb)
+        rows = db.list_pending_bridges()
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["src_chain"] == "base" and r["dst_chain"] == "arc"
+        assert r["amount"] == 25.0 and r["message_hash"] == mh
+        db.remove_pending_bridge(pid)
+        assert db.list_pending_bridges() == []
+
+    def test_resume_pending_bridges_noop_when_empty(self, db):
+        from memicoin_core.bridge import resume_pending_bridges
+        assert resume_pending_bridges(db, None) == []
+
+
+class TestOnchainBridgeRealMode:
+    """Real-mode CCTP flow with mocked web3/requests (no network)."""
+
+    def test_message_sent_extraction_and_hash(self):
+        from memicoin_core.bridge import _extract_message_sent
+        message = b"cctp-message-payload"
+        data = ((32).to_bytes(32, "big") + len(message).to_bytes(32, "big")
+                + message)
+        receipt = {"logs": [{"topics": [bytes.fromhex(
+            "2fa9ca894982930190727e75500a97d8dc500233a5065e0f3126c48fbe0343c0")],
+            "data": data}]}
+        extracted = _extract_message_sent(receipt)
+        assert extracted == message
+
+    def test_unsupported_pair_refused(self, db):
+        from memicoin_core.bridge import bridge_usdc
+        class _Store:
+            def has(self, k): return k == "onchain_private_key"
+            def get(self, k): return "0x" + "1" * 64
+        res = bridge_usdc(_Store(), "binance-smart-chain", "arc", 5.0)
+        assert not res.ok and "not supported" in res.error
+
+
+class TestEngineBridgeConstraints:
+    def test_bridge_rejected_when_chain_not_allowed(self, db, monkeypatch):
+        c = Constraints(paper_trading=True, allowed_chains=["base"])
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        ai_out = json.dumps({
+            "analysis_summary": "bridge to arc",
+            "actions": [{"type": "bridge", "from_chain": "ethereum",
+                         "to_chain": "arc", "amount_or_percent": 50,
+                         "reason": "opportunity on arc"}],
+            "confidence": "medium"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        engine.run_cycle()
+        d = db.list_decisions()[0]
+        assert d["action"] == "bridge" and d["status"] == "rejected"
+        assert "allowed chains" in d["reason"]
+
+    def test_bridge_allowed_when_chains_permitted(self, db, monkeypatch):
+        c = Constraints(paper_trading=True,
+                        allowed_chains=["ethereum", "arc"])
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        ai_out = json.dumps({
+            "analysis_summary": "bridge to arc",
+            "actions": [{"type": "bridge", "from_chain": "ethereum",
+                         "to_chain": "arc", "amount_or_percent": 50,
+                         "reason": "opportunity on arc"}],
+            "confidence": "medium"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        engine.run_cycle()
+        d = db.list_decisions()[0]
+        assert d["action"] == "bridge" and d["status"] == "executed"
+
+
+class TestSlippageBound:
+    def test_swap_without_min_out_refused(self, db):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "base"
+        w.cfg = {"chain_id": 8453, "router": "0x" + "4" * 40}
+        w._acct = None
+        r = w.swap_exact_tokens_for_tokens("0x" + "2" * 40, "0x" + "3" * 40, 1.0)
+        assert not r.ok and "slippage bound" in r.error
+
+    def test_swap_with_min_out_encodes_amount_out_min(self, db):
+        from unittest.mock import MagicMock
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "base"
+        w.cfg = {"chain_id": 8453, "router": "0x" + "4" * 40,
+                 "weth": "0x" + "5" * 40}
+        w._acct = None
+        captured = {}
+
+        class _C:
+            def encode_abi(self, name, args):
+                captured["name"] = name
+                captured["args"] = args
+                return b"0xdata"
+
+        class _Eth:
+            contract = MagicMock(return_value=_C())
+            gas_price = 20 * 10 ** 9
+            def get_transaction_count(self, a):
+                return 0
+        class _W3:
+            eth = _Eth()
+            to_checksum_address = staticmethod(lambda a: a)
+        w.w3 = _W3()
+        w.address = lambda: "0x" + "a" * 40
+        w._erc20_decimals = lambda t: 18
+        w.erc20_approve_if_needed = lambda *a, **k: None
+        w._base_tx = lambda to, data, value=0: {"to": to, "data": data}
+        w._send = lambda tx: "0xdeadbeef"
+        r = w.swap_exact_tokens_for_tokens("0x" + "2" * 40, "0x" + "3" * 40,
+                                           1.0, min_amount_out=0.9)
+        assert r.ok and r.tx_id == "0xdeadbeef"
+        # amountOutMin = 0.9 * 10**18, NOT 1
+        assert captured["name"] == "swapExactTokensForTokens"
+        assert captured["args"][1] == int(0.9 * 10 ** 18)

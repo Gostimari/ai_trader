@@ -100,6 +100,16 @@ class Database:
                 cost_basis_usd REAL DEFAULT 0,
                 UNIQUE(chain, asset, contract)
             );
+            CREATE TABLE IF NOT EXISTS pending_bridges (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                src_chain TEXT NOT NULL,
+                dst_chain TEXT NOT NULL,
+                amount REAL NOT NULL,
+                message_hash TEXT NOT NULL,
+                message_bytes TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+            );
             """
         )
         self.conn.commit()
@@ -292,4 +302,30 @@ class Database:
     def demo_clear(self) -> None:
         with _lock:
             self.conn.execute("DELETE FROM demo_wallet")
+            self.conn.commit()
+
+    # ---------- pending bridges (CCTP burn confirmed, mint awaiting
+    # attestation; completed on a later cycle) ----------
+    def add_pending_bridge(self, src_chain: str, dst_chain: str, amount: float,
+                           message_hash: str, message_bytes: str) -> str:
+        pid = new_id()
+        with _lock:
+            self.conn.execute(
+                "INSERT INTO pending_bridges (id, created_at, src_chain, dst_chain, "
+                "amount, message_hash, message_bytes, status) "
+                "VALUES (?,?,?,?,?,?,?, 'pending')",
+                (pid, utcnow(), src_chain, dst_chain, float(amount),
+                 message_hash, message_bytes))
+            self.conn.commit()
+        return pid
+
+    def list_pending_bridges(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM pending_bridges WHERE status='pending' ORDER BY created_at"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_pending_bridge(self, pid: str) -> None:
+        with _lock:
+            self.conn.execute("DELETE FROM pending_bridges WHERE id=?", (pid,))
             self.conn.commit()

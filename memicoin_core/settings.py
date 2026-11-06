@@ -42,6 +42,12 @@ class Constraints(BaseModel):
         default=1.0, ge=0,
         description="Dust guard: reject buys below this USD value. Buys are sized in USD.",
     )
+    onchain_slippage_pct: float = Field(
+        default=5.0, ge=0, le=50,
+        description="Max slippage tolerated on real on-chain swaps (percent). "
+                    "The swap reverts on-chain if the received amount is "
+                    "below the expected amount minus this tolerance.",
+    )
     autonomy_mode: AutonomyMode = "constrained"
     custom_prompt: str = Field(
         default="", description="Behavioral instructions the AI reads before every decision."

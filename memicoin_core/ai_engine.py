@@ -6,6 +6,7 @@ Invalid or unreachable AI responses mean NO trades that day.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Optional
 
@@ -16,6 +17,8 @@ from .db import Database, utcnow
 from .market import MarketDataError, MarketDataModule
 from .portfolio import PortfolioTracker
 from .settings import Constraints
+
+log = logging.getLogger("memicoin.engine")
 
 MAX_ACTIONS_PER_CYCLE = 6
 
@@ -144,6 +147,9 @@ class DecisionEngine:
         # demo-aware from the very beginning of the cycle
         self.db.demo_mode_percent = (not self.constraints.paper_trading
                                      and self.constraints.live_execution_mode == "demo")
+        if (not self.constraints.paper_trading
+                and self.constraints.live_execution_mode == "onchain"):
+            self._resume_pending_bridges(cycle_id)
         try:
             prices = self.market.get_prices(force=True)
             assets = self.market.get_asset_map(force=True)
@@ -557,7 +563,7 @@ class DecisionEngine:
             return f"resolved to non-positive amount for {asset}"
 
         if not self.constraints.paper_trading:
-            return self._execute_live(cycle_id, action, asset, amount)
+            return self._execute_live(cycle_id, action, asset, amount, prices)
 
         if action["type"] == "buy":
             cost = amount * price
@@ -613,6 +619,11 @@ class DecisionEngine:
             from .demowallet import DemoWallet
             demo = DemoWallet(self.db)
             src_balance = demo.balance(src, "USDC")
+        elif (not self.constraints.paper_trading
+              and self.constraints.live_execution_mode == "onchain"):
+            # real wallet: read the ACTUAL USDC balance on the source chain
+            # (paper cash is meaningless here)
+            src_balance = self._onchain_usdc_balance(src)
         else:
             src_balance = self.db.get_cash() if src == "ethereum" else 0.0
         if is_pct:
@@ -630,6 +641,16 @@ class DecisionEngine:
                 "reason": (f"Malformed bridge proposal: {src}->{dst} {amt_raw!r}. "
                            f"{reason}" if not src or not dst else
                            f"Nothing to bridge: {src_balance:.4f} USDC on {src}. {reason}")})
+            return
+        # bridges move funds BETWEEN chains, so BOTH endpoints must be
+        # user-allowed (constraint enforced in code, not by the AI)
+        allowed = [c.lower() for c in self.constraints.allowed_chains]
+        if self.constraints.autonomy_mode == "constrained" and (
+                src not in allowed or dst not in allowed):
+            self.db.add_decision({
+                "cycle_id": cycle_id, "action": "bridge", "status": "rejected",
+                "reason": (f"Bridge {src}->{dst} rejected: chain not in your "
+                           f"allowed chains ({', '.join(allowed)}). {reason}")})
             return
         if getattr(self.db, "demo_mode_percent", False):
             # demo mode: settle against the demo wallet (gas deducted on src)
@@ -652,6 +673,17 @@ class DecisionEngine:
                     "reason": "Bridge failed: no EVM wallet key imported"})
                 return
             res = bridge_usdc(self._onchain_secrets, src, dst, amt)
+            if res.pending:
+                # burn confirmed, attestation not landed yet: persist so a
+                # later cycle completes the mint (funds are NOT lost)
+                self.db.add_pending_bridge(src, dst, amt,
+                                           res.message_hash, res.message_bytes)
+                self.db.add_decision({
+                    "cycle_id": cycle_id, "action": "bridge", "asset_in": "USDC",
+                    "asset_out": dst, "amount": amt, "status": "executed",
+                    "reason": f"Bridge {src}->{dst}: {res.error}",
+                    "tx_id": res.tx_id})
+                return
             self.db.add_decision({
                 "cycle_id": cycle_id, "action": "bridge", "asset_in": "USDC",
                 "asset_out": dst, "amount": amt, "status": "executed" if res.ok else "failed",
@@ -664,11 +696,57 @@ class DecisionEngine:
                 "asset_out": dst, "amount": amt, "status": "executed",
                 "reason": f"[PAPER] Bridge {src}->{dst} of {amt} USDC simulated. {reason}"})
 
-    def _execute_live(self, cycle_id: str, action: dict, asset: str, amount: float) -> str | None:
+    def _onchain_usdc_balance(self, chain: str) -> float:
+        """Real USDC balance on an EVM chain (arc: USDC IS the native gas
+        token, so it is read as the native balance)."""
+        if self._onchain_secrets is None:
+            return 0.0
+        try:
+            from .bridge import burn_token_for
+            from .onchain import EVMWallet, EVM_CHAINS
+            if chain not in EVM_CHAINS:
+                return 0.0
+            w = EVMWallet(self._onchain_secrets, chain)
+            if not w.configured():
+                return 0.0
+            if chain == "arc":
+                return w.native_balance()
+            token = burn_token_for(chain)
+            return w.erc20_balance(token) if token else 0.0
+        except Exception as e:
+            log.warning("could not read USDC balance on %s: %s", chain, e)
+            return 0.0
+
+    def _resume_pending_bridges(self, cycle_id: str) -> None:
+        """Complete CCTP mints whose attestation landed since the burn."""
+        from .bridge import resume_pending_bridges
+        try:
+            results = resume_pending_bridges(self.db, self._onchain_secrets)
+        except Exception as e:
+            self.db.add_decision({
+                "cycle_id": cycle_id, "action": "bridge", "status": "failed",
+                "reason": f"Bridge resume error: {e}"})
+            return
+        for r in results:
+            if r.get("ok"):
+                reason = (f"Bridge completion: {r['amount']} USDC minted on "
+                          f"{r['dst_chain']} (burned earlier on "
+                          f"{r['src_chain']}). Funds investable this cycle.")
+            else:
+                reason = (f"Bridge {r['src_chain']}->{r['dst_chain']} still "
+                          f"pending: {r.get('error', 'attestation not ready')}")
+            self.db.add_decision({
+                "cycle_id": cycle_id, "action": "bridge", "asset_in": "USDC",
+                "asset_out": r.get("dst_chain", ""), "amount": r.get("amount"),
+                "status": "executed" if r.get("ok") else "failed",
+                "reason": reason, "tx_id": r.get("mint_tx", "")})
+
+    def _execute_live(self, cycle_id: str, action: dict, asset: str, amount: float,
+                      prices: dict[str, float] | None = None) -> str | None:
         if self.constraints.live_execution_mode == "demo":
             return self._execute_demo(cycle_id, action, asset, amount)
         if self.constraints.live_execution_mode == "onchain":
-            return self._execute_onchain(cycle_id, action, asset, amount)
+            return self._execute_onchain(cycle_id, action, asset, amount, prices)
 
     def _execute_demo(self, cycle_id: str, action: dict, asset: str, amount: float) -> str | None:
         """Demo-wallet execution: identical validation, real DexScreener
@@ -794,11 +872,13 @@ class DecisionEngine:
         })
         return None
 
-    def _execute_onchain(self, cycle_id: str, action: dict, asset: str, amount: float) -> str | None:
+    def _execute_onchain(self, cycle_id: str, action: dict, asset: str, amount: float,
+                         prices: dict[str, float] | None = None) -> str | None:
         """Mode B: swap on a DEX with the imported hot wallet. The AI works in
         token tickers; on-chain mode requires contract addresses/mints, so we
         look them up from the market snapshot's chain data."""
         from .onchain import EVM_CHAINS, wallet_for
+        prices = prices or {}
         chain = self.constraints.onchain_chain
         # SAFETY FIRST: the asset identifier must be a contract/mint address
         # before anything else (including gas checks) runs.
@@ -814,24 +894,57 @@ class DecisionEngine:
             ok, why = wallet.gas_ok()
             if not ok:
                 return f"gas check failed on {chain}: {why}"
-        # asset identifiers in on-chain mode are contract addresses/mints,
-        # supplied by the AI as the asset field and validated against the
-        # chain registry; a bare ticker cannot be traded on-chain.
-        token = action["asset"]
-        if not self._looks_like_address(token):
-            return (f"on-chain swap needs a token contract address for {token!r}; "
-                    f"the AI must provide contract/mint addresses in on-chain mode")
+        # slippage bound: every real swap carries an explicit amountOutMin
+        # computed from market prices (never the router's default of 1)
+        slip = self.constraints.onchain_slippage_pct / 100.0
         if action["type"] == "buy":
-            res = (wallet.swap_exact_eth_for_tokens(token, amount)
-                   if chain in EVM_CHAINS else wallet.swap("native", token, amount))
+            token_price = self._token_price(action, asset, token, prices)
+            if token_price <= 0:
+                return f"no reliable price for {asset}: refusing on-chain buy"
+            usd_budget = amount * token_price
+            if chain in EVM_CHAINS:
+                native_price = self._native_price(chain, prices)
+                if native_price <= 0:
+                    return (f"no reliable price for the {chain} gas token: "
+                            f"refusing on-chain buy")
+                # amount is a token QUANTITY (shared resolver contract); the
+                # router needs the native-token budget that buys it
+                native_qty = usd_budget / native_price
+                res = wallet.swap_exact_eth_for_tokens(
+                    token, native_qty, min_amount_out=amount * (1 - slip))
+            else:
+                sol_price = self._native_price(chain, prices)
+                if sol_price <= 0:
+                    return (f"no reliable price for the {chain} gas token: "
+                            f"refusing on-chain buy")
+                res = wallet.swap(self._native_mint(chain), token,
+                                  usd_budget / sol_price,
+                                  slippage_bps=int(self.constraints.onchain_slippage_pct * 100))
         else:
             dest = action.get("asset_out") or ("native" if chain in EVM_CHAINS else self._native_mint(chain))
             if action["type"] == "swap" and dest and self._looks_like_address(dest):
-                res = (wallet.swap_exact_tokens_for_tokens(token, dest, amount)
-                       if chain in EVM_CHAINS else wallet.swap(token, dest, amount))
+                if chain in EVM_CHAINS:
+                    min_out = self._min_out_for(action, asset, token, dest, amount, prices, slip)
+                    if min_out is None:
+                        return (f"no reliable price for {dest}: refusing "
+                                f"on-chain swap without slippage protection")
+                    res = wallet.swap_exact_tokens_for_tokens(token, dest, amount,
+                                                              min_amount_out=min_out)
+                else:
+                    res = wallet.swap(token, dest, amount,
+                                      slippage_bps=int(self.constraints.onchain_slippage_pct * 100))
             else:
-                res = (wallet.swap_exact_tokens_for_tokens(token, wallet._weth() or "", amount)
-                       if chain in EVM_CHAINS else wallet.swap(token, self._native_mint(chain), amount))
+                if chain in EVM_CHAINS:
+                    weth = wallet._weth() or ""
+                    min_out = self._min_out_for(action, asset, token, weth, amount, prices, slip)
+                    if min_out is None:
+                        return (f"no reliable price for {weth or 'the gas token'}: "
+                                f"refusing on-chain sell without slippage protection")
+                    res = wallet.swap_exact_tokens_for_tokens(token, weth, amount,
+                                                              min_amount_out=min_out)
+                else:
+                    res = wallet.swap(token, self._native_mint(chain), amount,
+                                      slippage_bps=int(self.constraints.onchain_slippage_pct * 100))
         if not res.ok:
             return res.error
         self.db.add_decision({
@@ -841,6 +954,51 @@ class DecisionEngine:
             "reason": action["reason"], "tx_id": res.tx_id,
         })
         return None
+
+    def _token_price(self, action: dict, asset: str, token: str,
+                     prices: dict[str, float]) -> float:
+        p = action.get("_price") or prices.get(asset, 0.0)
+        if p > 0:
+            return p
+        try:
+            addr_p = self.market.get_prices_for_addresses([token])
+            return addr_p.get((token or "").lower(), 0.0)
+        except Exception:
+            return 0.0
+
+    def _native_price(self, chain: str, prices: dict[str, float]) -> float:
+        """USD price of the chain's gas token, priced via its wrapped
+        contract when the symbol map misses (ETH on base, etc.)."""
+        from .onchain import EVM_CHAINS
+        if chain not in EVM_CHAINS:
+            return prices.get("SOL", 0.0)
+        sym = EVM_CHAINS[chain].get("native_symbol", "ETH")
+        if sym == "USDC":
+            return 1.0
+        p = prices.get(sym, 0.0)
+        if p > 0:
+            return p
+        w = EVM_CHAINS[chain].get("weth")
+        if w:
+            try:
+                addr_p = self.market.get_prices_for_addresses([w])
+                return addr_p.get(w.lower(), 0.0)
+            except Exception:
+                return 0.0
+        return 0.0
+
+    def _min_out_for(self, action: dict, asset: str, token_in: str,
+                     token_out: str, qty_in: float, prices: dict[str, float],
+                     slip: float) -> float | None:
+        """Minimum acceptable output quantity for a token->token swap,
+        derived from market prices with the slippage tolerance applied."""
+        price_in = self._token_price(action, asset, token_in, prices)
+        if price_in <= 0:
+            return None
+        price_out = self._token_price({}, token_out, token_out, prices)
+        if price_out <= 0:
+            return None
+        return qty_in * price_in / price_out * (1 - slip)
 
     @staticmethod
     def _looks_like_address(s: str) -> bool:

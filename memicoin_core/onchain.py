@@ -191,7 +191,8 @@ class EVMWallet:
 # ---------- writes ----------
     def _send(self, tx: dict) -> str:
         signed = self._account().sign_transaction(tx)
-        h = self.w3.eth.send_raw_transaction(signed["rawTransaction"])
+        raw = signed.get("raw_transaction") or signed.get("rawTransaction")
+        h = self.w3.eth.send_raw_transaction(raw)
         receipt = self.w3.eth.wait_for_transaction_receipt(h, timeout=180)
         if receipt["status"] != 1:
             raise RuntimeError(f"transaction reverted: {h.hex()}")
@@ -229,16 +230,24 @@ class EVMWallet:
             self._send(self._base_tx(token, data))
 
     def swap_exact_tokens_for_tokens(self, token_in: str, token_out: str,
-                                     amount_in: float) -> TxResult:
-        """Uniswap-V2-style swap via the chain router."""
+                                     amount_in: float,
+                                     min_amount_out: float | None = None) -> TxResult:
+        """Uniswap-V2-style swap via the chain router. min_amount_out is the
+        caller's slippage bound in OUTPUT-token units; without it the swap
+        is refused (amountOutMin=1 would accept any sandwich attack)."""
         try:
             router = self._router()
             if not router:
                 return TxResult(False, error=self._no_router_error())
+            if min_amount_out is None:
+                return TxResult(False, error=(
+                    "refusing to swap without a slippage bound: no "
+                    "min_amount_out computed from market prices"))
             dec_in = self._erc20_decimals(token_in)
             raw_in = int(amount_in * 10 ** dec_in)
             self.erc20_approve_if_needed(token_in, router, raw_in)
             dec_out = self._erc20_decimals(token_out)
+            raw_min = max(1, int(min_amount_out * 10 ** dec_out))
             abi = [{"constant": False,
                     "inputs": [{"name": "amountIn", "type": "uint256"},
                                {"name": "amountOutMin", "type": "uint256"},
@@ -257,7 +266,7 @@ class EVMWallet:
                 address=self.w3.to_checksum_address(router), abi=abi)
             data = router_c.encode_abi(
                 "swapExactTokensForTokens",
-                args=[raw_in, 1, path, self.address(), deadline])
+                args=[raw_in, raw_min, path, self.address(), deadline])
             tx_id = self._send(self._base_tx(router, data))
             return TxResult(True, tx_id=tx_id, amount=amount_in)
         except Exception as e:
@@ -280,10 +289,13 @@ class EVMWallet:
         return (f"No DEX router configured for {self.chain} yet — swaps are disabled "
                 f"on this chain until one is set (MEMICOIN_{self.chain.upper().replace('-', '_')}_ROUTER)")
 
-    def swap_exact_eth_for_tokens(self, token_out: str, eth_amount: float) -> TxResult:
+    def swap_exact_eth_for_tokens(self, token_out: str, eth_amount: float,
+                                  min_amount_out: float | None = None) -> TxResult:
         """Buy with native currency (ETH/MATIC/BNB/USDC-on-Arc) through the
         wrapped path. Enforces the gas reserve: spending beyond
-        investable_native() is refused, never clamped silently."""
+        investable_native() is refused, never clamped silently. Also refuses
+        to trade without a slippage bound (min_amount_out in OUTPUT-token
+        units) - amountOutMin=1 would accept any price."""
         try:
             investable = self.investable_native()
             if eth_amount > investable + 1e-12:
@@ -295,9 +307,15 @@ class EVMWallet:
             router = self._router()
             if not router:
                 return TxResult(False, error=self._no_router_error())
+            if min_amount_out is None:
+                return TxResult(False, error=(
+                    "refusing to swap without a slippage bound: no "
+                    "min_amount_out computed from market prices"))
             weth = self._weth()
             if not weth:
                 return TxResult(False, error=f"No wrapped-native token configured for {self.chain}")
+            dec_out = self._erc20_decimals(token_out)
+            raw_min = max(1, int(min_amount_out * 10 ** dec_out))
             abi = [{"constant": False,
                     "inputs": [{"name": "amountOutMin", "type": "uint256"},
                                {"name": "path", "type": "address[]"},
@@ -312,7 +330,7 @@ class EVMWallet:
             router_c = self.w3.eth.contract(
                 address=self.w3.to_checksum_address(router), abi=abi)
             data = router_c.encode_abi("swapExactETHForTokens",
-                                       args=[1, path, self.address(), deadline])
+                                       args=[raw_min, path, self.address(), deadline])
             value_wei = self.w3.to_wei(eth_amount, "ether")
             tx_id = self._send(self._base_tx(router, data, value_wei))
             return TxResult(True, tx_id=tx_id, amount=eth_amount)
@@ -353,8 +371,19 @@ class SolanaWallet:
         resp = client.get_balance(self._kp().pubkey())
         return float(resp.value) / 1e9
 
-    def swap(self, token_in: str, token_out: str, amount_in: float) -> TxResult:
-        """Swap via Jupiter aggregator (quote + swap)."""
+    def _spl_decimals(self, mint: str) -> int:
+        import os
+        from solana.rpc.api import Client
+        from solders.pubkey import Pubkey
+        client = Client(os.environ.get("MEMICOIN_RPC_SOLANA", SOLANA["rpc"]))
+        resp = client.get_token_supply(Pubkey.from_string(mint))
+        return int(resp.value.decimals)
+
+    def swap(self, token_in: str, token_out: str, amount_in: float,
+             slippage_bps: int = 100) -> TxResult:
+        """Swap via Jupiter aggregator (quote + swap). amount_in is in HUMAN
+        token units; it is converted to raw units with the input mint's
+        decimals (WSOL = 9 -> lamports)."""
         try:
             import os
             import requests as _req
@@ -362,8 +391,9 @@ class SolanaWallet:
             from solders.keypair import Keypair
             kp = self._kp()
             client = Client(os.environ.get("MEMICOIN_RPC_SOLANA", SOLANA["rpc"]))
+            raw_in = int(amount_in * 10 ** self._spl_decimals(token_in))
             params = {"inputMint": token_in, "outputMint": token_out,
-                      "amount": int(amount_in), "slippageBps": 100}
+                      "amount": raw_in, "slippageBps": max(0, int(slippage_bps))}
             quote = _req.get("https://quote-api.jup.ag/v6/quote", params=params, timeout=20)
             quote.raise_for_status()
             swap_body = {"quoteResponse": quote.json(),
