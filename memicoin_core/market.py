@@ -54,6 +54,23 @@ _ADDRESS_HINT = ("0x", "0X")
 USER_AGENT = "MemeCoinAITrader/0.1 (local desktop app)"
 TIMEOUT = 15
 
+# Fresh-token feeds (public DexScreener endpoints, no key): newly profiled
+# and actively boosted tokens. Merging these into the universe is what lets
+# the AI trade brand-new coins without the user adding contracts. Every
+# candidate is re-checked through the token-pairs endpoint and must pass
+# liquidity/volume floors before it can enter the universe.
+FRESH_FEED_URLS = [
+    "https://api.dexscreener.com/token-boosts/latest/v1",
+    "https://api.dexscreener.com/token-profiles/latest/v1",
+]
+FRESH_MAX_TOKENS = 40            # cap per refresh (prompt size + API calls)
+FRESH_MIN_LIQUIDITY_USD = 10_000.0
+FRESH_MIN_VOL24_USD = 1_000.0
+
+# DexScreener chain ids -> app chain names (the validator's allowed-chains
+# check compares against the app names)
+DS_CHAIN_ALIAS = {"bsc": "binance-smart-chain"}
+
 
 class MarketDataError(Exception):
     pass
@@ -120,6 +137,82 @@ class MarketDataModule:
     def get_asset_map(self, force: bool = False) -> dict[str, dict]:
         return {a["asset"]: a for a in self.get_market_overview(force)}
 
+    def search_contract(self, symbol: str, chain: str | None = None) -> dict | None:
+        """Live ticker -> best DexScreener pair (contract included). Last-resort
+        resolver for tokens the AI wants to trade that are not in the cached
+        universe yet (brand-new coins). None when nothing tradable is found."""
+        symbol = (symbol or "").strip()
+        if not symbol or _is_address(symbol):
+            return None
+        try:
+            pairs = self._ds_search(symbol)
+        except requests.RequestException:
+            return None
+        allowed = {chain.lower()} if chain else None
+        return self._best_pair(pairs, wanted_chains=allowed, symbol=symbol)
+
+    def note_asset(self, pair: dict) -> str | None:
+        """Insert a resolved pair into the cached universe (in-memory) so
+        validation, pricing and the executor all see it this cycle."""
+        if not self._cache:
+            return None
+        m: dict = {}
+        self._add_ds_asset(m, pair)
+        sym = next(iter(m), None)
+        if not sym:
+            return None
+        assets = self._cache.setdefault("assets", [])
+        if not any(a.get("asset") == sym for a in assets):
+            assets.append(m[sym])
+        return sym
+
+    def _fresh_pairs(self, allowed: set[str] | None) -> list[dict]:
+        """Fresh/hot tokens from DexScreener's public boost + profile feeds,
+        filtered to the allowed chains. Returns the deepest qualifying pair
+        per token (contracts included), liquidity/volume floors applied."""
+        seen: dict[tuple[str, str], None] = {}
+        for url in FRESH_FEED_URLS:
+            try:
+                resp = requests.get(url, timeout=TIMEOUT,
+                                    headers={"User-Agent": USER_AGENT})
+                resp.raise_for_status()
+                items = resp.json() or []
+            except (requests.RequestException, ValueError):
+                continue
+            for it in items:
+                dsc = (it.get("chainId") or "").lower()
+                addr = it.get("tokenAddress") or ""
+                chain = DS_CHAIN_ALIAS.get(dsc, dsc)
+                if not addr or chain not in self.REAL_CHAINS:
+                    continue
+                if allowed and chain not in allowed:
+                    continue
+                seen.setdefault((chain, addr.lower()), None)
+                if len(seen) >= FRESH_MAX_TOKENS:
+                    break
+            if len(seen) >= FRESH_MAX_TOKENS:
+                break
+        best: dict[str, dict] = {}
+        addrs = [addr for (_ch, addr) in seen]
+        for i in range(0, len(addrs), 30):
+            try:
+                pairs = self._ds_token_pairs(addrs[i:i + 30])
+            except requests.RequestException:
+                continue
+            for p in pairs:
+                base = p.get("baseToken") or {}
+                addr = (base.get("address") or "").lower()
+                if not addr:
+                    continue
+                liq = float((p.get("liquidity") or {}).get("usd") or 0.0)
+                vol = float((p.get("volume") or {}).get("h24") or 0.0)
+                if liq < FRESH_MIN_LIQUIDITY_USD or vol < FRESH_MIN_VOL24_USD:
+                    continue
+                prev = float((best.get(addr, {}).get("liquidity") or {}).get("usd") or 0.0)
+                if addr not in best or liq > prev:
+                    best[addr] = p
+        return list(best.values())
+
     # ---------- watchlist helpers ----------
     def _watchlist(self) -> list[str]:
         return [i.strip() for i in (self.db.get_setting("extra_asset_ids", DEFAULT_EXTRA_IDS) or []) if i.strip()]
@@ -164,6 +257,17 @@ class MarketDataModule:
                 best = self._best_pair(pairs, wanted_chains=allowed)
                 if best:
                     self._add_ds_asset(assets, best)
+
+        # 4) fresh-token feeds: automatically add newly launched/boosted
+        # tokens (contracts included) on the allowed chains, so the AI can
+        # trade brand-new coins without the user adding anything
+        try:
+            if (self.db.get_setting("constraints") or {}).get(
+                    "auto_market_expansion", True):
+                for p in self._fresh_pairs(allowed):
+                    self._add_ds_asset(assets, p)
+        except Exception:
+            pass
 
         if not assets:
             raise MarketDataError("DexScreener returned no usable pairs")
@@ -239,10 +343,11 @@ class MarketDataModule:
         if not key or key in assets:
             return
         base = p.get("baseToken") or {}
+        dsc = p.get("chainId", "")
         assets[key] = {
             "asset": key,
             "name": base.get("name", key),
-            "chain": p.get("chainId", ""),
+            "chain": DS_CHAIN_ALIAS.get(dsc, dsc),
             "price_usd": float(p.get("priceUsd") or 0.0),
             "market_cap_usd": float(p.get("marketCap") or p.get("fdv") or 0.0),
             "volume_24h_usd": float(p.get("volume", {}).get("h24") or 0.0),

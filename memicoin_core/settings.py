@@ -56,6 +56,14 @@ class Constraints(BaseModel):
                     "mainnet. Mainnet chains are refused while ON, and "
                     "testnet chains are refused while OFF.",
     )
+    auto_market_expansion: bool = Field(
+        default=True,
+        description="Automatically add freshly launched / boosted tokens "
+                    "(DexScreener public feeds, contracts included) to the "
+                    "tradable universe on the allowed chains, so the AI can "
+                    "trade brand-new coins without the user adding anything. "
+                    "Turn off to trade only the watchlist.",
+    )
     autonomy_mode: AutonomyMode = "constrained"
     custom_prompt: str = Field(
         default="", description="Behavioral instructions the AI reads before every decision."

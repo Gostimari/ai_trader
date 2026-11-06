@@ -195,6 +195,46 @@ class ConstraintValidator:
                 asset = match
                 action["asset"] = asset
                 action["_contract"] = orig
+        info = known_assets.get(asset)
+        if a_type in ("buy", "sell", "swap") and info is None \
+                and self._market is not None \
+                and getattr(self.constraints, "auto_market_expansion", True):
+            # fresh token: resolve the ticker live on DexScreener so
+            # brand-new coins are tradable without the user adding
+            # contracts; the best pair supplies contract, chain and price
+            try:
+                pair = self._market.search_contract(
+                    asset, self.constraints.onchain_chain
+                    if self.constraints.live_execution_mode == "onchain" else None)
+            except Exception:
+                pair = None
+            if pair:
+                from .market import DS_CHAIN_ALIAS
+                base = pair.get("baseToken") or {}
+                dsc = (pair.get("chainId") or "")
+                chain = DS_CHAIN_ALIAS.get(dsc.lower(), dsc)
+                sym = (base.get("symbol") or asset).upper()
+                contract = base.get("address") or ""
+                if (self.constraints.live_execution_mode == "onchain"
+                        and chain != self.constraints.onchain_chain):
+                    return ValidationResult(
+                        False,
+                        f"{sym} trades on {chain}; on-chain swaps run on "
+                        f"{self.constraints.onchain_chain} only.")
+                info = {"asset": sym, "chain": chain, "contract": contract}
+                if sym != asset:
+                    asset = sym
+                    action["asset"] = asset
+                if contract:
+                    action["_contract"] = contract
+                try:
+                    price = float(pair.get("priceUsd") or 0.0)
+                except (TypeError, ValueError):
+                    price = 0.0
+                if price > 0 and not action.get("_price"):
+                    action["_price"] = price
+                self._market.note_asset(pair)
+
         amount = self._resolve_amount(action, prices)
 
         if a_type not in ("buy", "sell", "swap"):
@@ -237,7 +277,8 @@ class ConstraintValidator:
         # resolve asset: the AI may reference by symbol OR contract address.
         # Keep BOTH: the symbol for validation/pricing, the contract for the
         # executor (which requires the contract to identify the token).
-        info = known_assets.get(asset)
+        if info is None:
+            info = known_assets.get(asset)
         if info is None:
             for a in known_assets.values():
                 if (a.get("contract") or "").lower() == asset.lower():
@@ -248,7 +289,7 @@ class ConstraintValidator:
                     break
         elif info.get("contract"):
             action["_contract"] = info["contract"]
-        r = self._validate_asset(asset, known_assets)
+        r = self._validate_asset(asset, known_assets, info)
         if not r.ok:
             return r
 
@@ -451,13 +492,15 @@ class ConstraintValidator:
         return (", ".join(f"{p['quantity']:.6g} {p['asset']}"
                            for p in positions) or "nothing")
 
-    def _validate_asset(self, asset: str, known_assets: dict[str, dict]) -> ValidationResult:
+    def _validate_asset(self, asset: str, known_assets: dict[str, dict],
+                        info: dict | None = None) -> ValidationResult:
         c = self.constraints
         if not asset:
             return ValidationResult(False, "Missing asset.")
         if asset == STABLECOIN:
             return ValidationResult(True, "")
-        info = known_assets.get(asset)
+        if info is None:
+            info = known_assets.get(asset)
         if info is None and (self.constraints.live_execution_mode == "onchain"
                              and self.live_holdings is not None):
             al = (asset or "").lower()

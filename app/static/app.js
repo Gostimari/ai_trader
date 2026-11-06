@@ -154,6 +154,8 @@ function fillSettings(c) {
   setConsField("#onchain_slippage_pct", c.onchain_slippage_pct ?? 5);
   const tn = $("#onchain_testnet");
   if (tn && tn !== document.activeElement) tn.checked = !!c.onchain_testnet;
+  const ame = $("#auto_market_expansion");
+  if (ame && ame !== document.activeElement) ame.checked = c.auto_market_expansion !== false;
   setConsField("#onchain_chain", c.onchain_chain || "ethereum");
   setConsField("#allowed_chains", (c.allowed_chains || []).join(", "));
   setConsField("#decision_time_utc", c.decision_time_utc);
@@ -172,6 +174,7 @@ function collectConstraints() {
     min_trade_usd: Number($("#min_trade_usd").value),
     onchain_slippage_pct: Number($("#onchain_slippage_pct").value),
     onchain_testnet: $("#onchain_testnet").checked,
+    auto_market_expansion: $("#auto_market_expansion").checked,
     onchain_chain: $("#onchain_chain").value,
     allowed_chains: $("#allowed_chains").value.split(",").map((s) => s.trim()).filter(Boolean),
     decision_time_utc: $("#decision_time_utc").value || "00:00",
@@ -349,6 +352,7 @@ function controls() {
   $("#settings-form").addEventListener("submit", (ev) => ev.preventDefault());
   ["#profit_target_pct", "#max_loss_pct", "#per_position_stop_pct", "#risk_profile",
    "#max_position_pct", "#min_trade_usd", "#onchain_slippage_pct", "#onchain_testnet",
+   "#auto_market_expansion",
    "#onchain_chain", "#allowed_chains", "#decision_time_utc", "#custom_prompt",
    "#autonomy_mode"].forEach((sel) => {
     const el = $(sel);

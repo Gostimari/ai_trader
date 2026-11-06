@@ -3861,3 +3861,191 @@ class TestOnchainChainSetting:
         assert r.status_code == 200
         cc = load_constraints(db)
         assert cc.live_execution_mode == "onchain" and cc.onchain_chain == "base"
+
+
+class TestFreshTokenExpansion:
+    """Autonomy: the bot can trade brand-new tokens without the user
+    adding contracts - fresh/boosted DexScreener feeds expand the universe,
+    and unknown tickers resolve live at decision time."""
+
+    def _module(self, db):
+        from memicoin_core.market import MarketDataModule
+        return MarketDataModule(db)
+
+    def test_fresh_feed_expands_universe(self, db, monkeypatch):
+        m = self._module(db)
+        FRESH = "0x" + "cd" * 20
+
+        def fake_get(url, **kw):
+            class _R:
+                def raise_for_status(self): pass
+                def json(self):
+                    if "boosts" in url:
+                        return [{"chainId": "base", "tokenAddress": FRESH}]
+                    return []
+            return _R()
+
+        import memicoin_core.market as mm
+        import requests as _rq
+        monkeypatch.setattr(mm, "requests", type("Rq", (), {
+            "get": staticmethod(fake_get),
+            "RequestException": _rq.RequestException}))
+        monkeypatch.setattr(m, "_ds_search", lambda q: [])
+        def fake_pairs(addrs):
+            if FRESH.lower() not in [a.lower() for a in addrs]:
+                return []
+            return [{"chainId": "base", "baseToken": {"symbol": "FRESH",
+                     "address": FRESH}, "priceUsd": "0.01",
+                     "liquidity": {"usd": 50000.0},
+                     "volume": {"h24": 20000.0}}]
+        monkeypatch.setattr(m, "_ds_token_pairs", fake_pairs)
+        assets = m.get_market_overview(force=True)
+        fresh = next(a for a in assets if a["asset"] == "FRESH")
+        assert fresh["contract"] == FRESH
+        assert fresh["chain"] == "base"
+        assert fresh["price_usd"] == pytest.approx(0.01)
+
+    def test_fresh_feed_respects_allowed_chains(self, db, monkeypatch):
+        db.set_setting("constraints", {"allowed_chains": ["base"],
+                                       "auto_market_expansion": True})
+        m = self._module(db)
+        FRESH = "0x" + "cd" * 20
+        SOL = "FreshSol" + "x" * 32
+
+        def fake_get(url, **kw):
+            class _R:
+                def raise_for_status(self): pass
+                def json(self):
+                    if "boosts" in url:
+                        return [{"chainId": "base", "tokenAddress": FRESH},
+                                {"chainId": "solana", "tokenAddress": SOL}]
+                    return []
+            return _R()
+
+        import memicoin_core.market as mm
+        import requests as _rq
+        monkeypatch.setattr(mm, "requests", type("Rq", (), {
+            "get": staticmethod(fake_get),
+            "RequestException": _rq.RequestException}))
+        monkeypatch.setattr(m, "_ds_search", lambda q: [])
+        monkeypatch.setattr(m, "_ds_token_pairs",
+                            lambda addrs: [{"chainId": "base",
+                                            "baseToken": {"symbol": "FRESH", "address": FRESH},
+                                            "priceUsd": "0.01",
+                                            "liquidity": {"usd": 50000.0},
+                                            "volume": {"h24": 20000.0}}])
+        assets = m.get_market_overview(force=True)
+        assert any(a["asset"] == "FRESH" for a in assets)
+        assert not any(a["chain"] == "solana" for a in assets)
+
+    def test_fresh_feed_can_be_disabled(self, db, monkeypatch):
+        db.set_setting("constraints", {"auto_market_expansion": False})
+        m = self._module(db)
+        called = []
+        monkeypatch.setattr(m, "_fresh_pairs",
+                            lambda allowed: called.append(1) or [])
+        monkeypatch.setattr(m, "_ds_search", lambda q: [])
+        monkeypatch.setattr(m, "_ds_token_pairs", lambda addrs: [])
+        m.get_market_overview(force=True)
+        assert called == []
+
+    def test_fresh_feed_liquidity_floor(self, db, monkeypatch):
+        m = self._module(db)
+        RUG = "0x" + "de" * 20
+
+        def fake_get(url, **kw):
+            class _R:
+                def raise_for_status(self): pass
+                def json(self):
+                    if "boosts" in url:
+                        return [{"chainId": "base", "tokenAddress": RUG}]
+                    return []
+            return _R()
+
+        import memicoin_core.market as mm
+        import requests as _rq
+        monkeypatch.setattr(mm, "requests", type("Rq", (), {
+            "get": staticmethod(fake_get),
+            "RequestException": _rq.RequestException}))
+        monkeypatch.setattr(m, "_ds_search", lambda q: [
+            {"chainId": "ethereum", "baseToken": {"symbol": "PEPE", "address": "0xpepe"},
+             "priceUsd": "0.001", "liquidity": {"usd": 100000.0},
+             "volume": {"h24": 50000.0}}] if q == "PEPE" else [])
+        def rug_pairs(addrs):
+            if RUG.lower() not in [a.lower() for a in addrs]:
+                return []
+            return [{"chainId": "base",
+                     "baseToken": {"symbol": "RUG", "address": RUG},
+                     "priceUsd": "0.01",
+                     "liquidity": {"usd": 500.0},
+                     "volume": {"h24": 100.0}}]
+        monkeypatch.setattr(m, "_ds_token_pairs", rug_pairs)
+        assets = m.get_market_overview(force=True)
+        assert not any(a["asset"] == "RUG" for a in assets)
+
+    def test_validator_resolves_fresh_token_buy(self, db):
+        FRESH = "0x" + "cd" * 20
+        pair = {"chainId": "base", "baseToken": {"symbol": "FRESH", "address": FRESH},
+                "priceUsd": "0.25", "liquidity": {"usd": 50000.0},
+                "volume": {"h24": 20000.0}}
+
+        class _M:
+            def search_contract(self, symbol, chain=None):
+                assert symbol == "FRESH"
+                return pair
+            def note_asset(self, p):
+                return "FRESH"
+
+        v = ConstraintValidator(db, Constraints(), market=_M())
+        action = {"type": "buy", "asset": "FRESH", "amount_or_percent": "5.0",
+                  "reason": "r"}
+        r = v.validate_action(action, {}, {})
+        assert r.ok
+        assert action["_contract"] == FRESH
+        assert action["_price"] == pytest.approx(0.25)
+
+    def test_validator_rejects_fresh_token_on_other_chain(self, db):
+        FRESH = "0x" + "cd" * 20
+        pair = {"chainId": "ethereum", "baseToken": {"symbol": "FRESH", "address": FRESH},
+                "priceUsd": "0.25", "liquidity": {"usd": 50000.0},
+                "volume": {"h24": 20000.0}}
+
+        class _M:
+            def search_contract(self, symbol, chain=None):
+                return pair
+            def note_asset(self, p):
+                return "FRESH"
+
+        c = Constraints(paper_trading=False, live_execution_mode="onchain",
+                        onchain_chain="base")
+        v = ConstraintValidator(db, c, market=_M())
+        r = v.validate_action(
+            {"type": "buy", "asset": "FRESH", "amount_or_percent": "5.0", "reason": "r"},
+            {}, {})
+        assert not r.ok
+        assert "trades on ethereum" in r.reason
+
+    def test_search_contract_prefers_requested_chain(self, db, monkeypatch):
+        m = self._module(db)
+        A = "0x" + "aa" * 20
+        B = "0x" + "bb" * 20
+        monkeypatch.setattr(m, "_ds_search", lambda q: [
+            {"chainId": "ethereum", "baseToken": {"symbol": "FRESH", "address": A},
+             "liquidity": {"usd": 90000.0}, "volume": {"h24": 50000.0}},
+            {"chainId": "base", "baseToken": {"symbol": "FRESH", "address": B},
+             "liquidity": {"usd": 40000.0}, "volume": {"h24": 20000.0}},
+        ])
+        best = m.search_contract("FRESH", "base")
+        assert best["baseToken"]["address"] == B
+        assert m.search_contract("FRESH")["baseToken"]["address"] == A
+
+    def test_note_asset_dedupes(self, db, monkeypatch):
+        m = self._module(db)
+        FRESH = "0x" + "cd" * 20
+        pair = {"chainId": "base", "baseToken": {"symbol": "FRESH", "address": FRESH},
+                "priceUsd": "0.01", "liquidity": {"usd": 50000.0},
+                "volume": {"h24": 20000.0}}
+        m._cache = {"assets": []}
+        assert m.note_asset(pair) == "FRESH"
+        assert m.note_asset(pair) == "FRESH"
+        assert len(m._cache["assets"]) == 1

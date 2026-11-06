@@ -92,6 +92,11 @@ Rules:
 - Percent amounts are checked against portfolio value (buys) or holdings
   (sells) by the execution layer BEFORE execution. Anything over the
   user's max position size will be rejected; size proposals to fit.
+- NEW TOKENS: the market list automatically includes freshly launched /
+  boosted tokens WITH their contract addresses - you MAY buy them without
+  asking the user. But they are the riskiest assets: weigh liquidity,
+  24h volume and momentum, size them small, and never concentrate the
+  portfolio in a token with thin liquidity.
 - CROSS-CHAIN FUNDING: USDC can be moved between EVM chains (ethereum,
   arc, and other CCTP chains listed in your context) with a "bridge"
   action: {"type": "bridge", "from_chain": "...", "to_chain": "...",
@@ -1230,6 +1235,19 @@ class DecisionEngine:
             for a in self.market.get_asset_map().values():
                 if a.get("asset", "").upper() == sym and a.get("contract"):
                     return a["contract"]
+        except Exception:
+            pass
+        # last resort: live DexScreener search for brand-new tokens that are
+        # not in the cached universe yet (contract from the best pair)
+        try:
+            if getattr(self.constraints, "auto_market_expansion", True):
+                best = self.market.search_contract(
+                    symbol, self.constraints.onchain_chain)
+                if best:
+                    addr = (best.get("baseToken") or {}).get("address") or ""
+                    if addr:
+                        self.market.note_asset(best)
+                        return addr
         except Exception:
             pass
         return ""
