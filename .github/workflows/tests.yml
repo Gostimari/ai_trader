@@ -25,6 +25,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python -c "import app.server; import memicoin_core.onchain; import memicoin_core.executor; print('imports ok')"
+      - run: python -c "import app.server; import memicoin_core.onchain; import memicoin_core.news; print('imports ok')"
         env:
           MEMICOIN_DB: ${{ runner.temp }}/smoke.db
