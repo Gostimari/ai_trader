@@ -227,6 +227,15 @@ class ConstraintValidator:
         if not r.ok:
             return r
 
+        if a_type in ("sell", "swap"):
+            held = self._held_qty(asset)
+            if held <= 0:
+                return ValidationResult(
+                    False,
+                    f"Cannot {a_type} {asset}: you do not hold it "
+                    f"(wallet holds: {self._holdings_hint()}). "
+                    f"Do not infer holdings from past decisions.")
+
         if amount is None or amount <= 0:
             if getattr(self.db, "demo_mode_percent", False) and a_type == "buy":
                 return ValidationResult(
@@ -316,12 +325,31 @@ class ConstraintValidator:
                                       f"{c.effective_max_position_pct():.0f}% position limit.")
                 return ValidationResult(True, "")
         elif a_type == "sell":
-            pos = self.db.get_position(asset)
-            if not pos or pos["quantity"] <= 0:
-                return ValidationResult(False, f"No position in {asset} to sell.")
-            if amount > pos["quantity"] + 1e-9:
-                return ValidationResult(False, f"Sell amount exceeds holdings of {asset}.")
+            held = self._held_qty(asset)
+            if amount > held + 1e-9:
+                return ValidationResult(
+                    False, f"Sell amount exceeds holdings of {asset} ({held:.6g}).")
         return ValidationResult(True, "")
+
+    def _held_qty(self, asset: str) -> float:
+        """Total held quantity of an asset in the ACTIVE books: the demo
+        wallet in demo mode, the paper portfolio otherwise."""
+        if getattr(self.db, "demo_mode_percent", False):
+            from .demowallet import DemoWallet
+            return sum(r["balance"] for r in DemoWallet(self.db).rows()
+                       if r["asset"] == asset and r["balance"] > 0)
+        pos = self.db.get_position(asset)
+        return pos["quantity"] if pos else 0.0
+
+    def _holdings_hint(self) -> str:
+        if getattr(self.db, "demo_mode_percent", False):
+            from .demowallet import DemoWallet
+            rows = [r for r in DemoWallet(self.db).rows() if r["balance"] > 0]
+            return (", ".join(f"{r['balance']:.6g} {r['asset']} on {r['chain']}"
+                               for r in rows) or "nothing")
+        positions = [p for p in self.db.get_positions() if p["quantity"] > 0]
+        return (", ".join(f"{p['quantity']:.6g} {p['asset']}"
+                           for p in positions) or "nothing")
 
     def _validate_asset(self, asset: str, known_assets: dict[str, dict]) -> ValidationResult:
         c = self.constraints

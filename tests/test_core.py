@@ -2766,3 +2766,53 @@ class TestActionCapClamps:
         # NOT 'invalid': the first 6 actions ran through validation
         assert result["status"] == "completed"
         assert len(result["executed"]) + len(result["rejected"]) + len(result["failed"]) == 6
+
+
+class _WrappedPriceMarket(_FakeMarket):
+    """Prices wrapped natives (WETH on base) so demo gas-only funding works."""
+
+    def get_prices_for_addresses(self, contracts):
+        return {"0x4200000000000000000000000000000000000006": 3000.0}
+
+
+class TestDemoSizingAndSells:
+    def test_demo_percent_buy_on_gas_only_chain_resolves_at_execution(self, db):
+        # Regression: the executor resolved demo percent buys WITHOUT the
+        # market module, so gas-token funding (ETH on base, priced via its
+        # wrapped contract) resolved to 0 AFTER passing validation.
+        db.demo_mode_percent = True
+        db.demo_set("base", "ETH", 0.0166, is_gas=True)  # ~$50 of ETH
+        engine = DecisionEngine(db, Constraints(), _WrappedPriceMarket())
+        prices = {"BRETT": 0.1}
+        action = {"type": "buy", "asset": "BRETT", "amount_or_percent": "20%",
+                  "_chain": "base", "_price": 0.1}
+        validated = engine.validator._resolve_amount(dict(action), prices)
+        executed = engine._resolve_amount(dict(action), prices)
+        assert validated is not None and validated > 0
+        assert executed == pytest.approx(validated)
+
+    def test_demo_sell_of_unheld_asset_rejected_with_clear_reason(self, db):
+        db.demo_mode_percent = True
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        v = ConstraintValidator(db, Constraints())
+        r = v.validate_action({"type": "sell", "asset": "SHIB",
+                               "amount_or_percent": "100%"}, PRICES, ASSETS)
+        assert not r.ok and "do not hold" in r.reason and "USDC" in r.reason
+
+    def test_demo_sell_of_held_asset_passes_validation(self, db):
+        # Regression: sell validation only checked the paper books, which are
+        # empty in demo mode, so demo-held assets could never be sold.
+        db.demo_mode_percent = True
+        db.demo_set("base", "DOGE", 100.0)
+        v = ConstraintValidator(db, Constraints())
+        r = v.validate_action({"type": "sell", "asset": "DOGE",
+                               "amount_or_percent": "50%"}, PRICES, ASSETS)
+        assert r.ok, r.reason
+
+    def test_demo_sell_more_than_held_rejected(self, db):
+        db.demo_mode_percent = True
+        db.demo_set("base", "DOGE", 100.0)
+        v = ConstraintValidator(db, Constraints())
+        r = v.validate_action({"type": "sell", "asset": "DOGE",
+                               "amount_or_percent": 150}, PRICES, ASSETS)
+        assert not r.ok and "exceeds holdings" in r.reason

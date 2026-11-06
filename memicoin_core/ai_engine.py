@@ -110,6 +110,7 @@ Rules:
   address. For buy/sell/swap actions ALWAYS set "asset" to the token's
   contract address from the market data (the execution layer requires
   it; trades by bare symbol are rejected).
+- HOLDINGS TRUTH: you can only SELL or SWAP assets that show a positive balance in the Portfolio state RIGHT NOW. Do NOT infer current holdings from Recent decisions — the wallet may have been edited, reset, or spent since those decisions. Proposing to sell an asset with no balance is always rejected.
 - The execution layer will reject anything violating the user's constraints; do not propose violations.
 - Cash is held in USD (paper mode). To exit a position, sell it.
 """
@@ -874,7 +875,10 @@ class DecisionEngine:
     def _resolve_amount(self, action: dict, prices: dict[str, float]) -> float:
         """Convert absolute or 'N%' amount into an absolute asset quantity.
         Delegates to the SAME shared resolver the constraint validator uses,
-        so what is validated is exactly what is executed."""
+        WITH the market module: demo percent buys funded from gas-only chains
+        price the gas token via wrapped contracts, and without the market
+        they resolve to 0 here after passing validation."""
         from .constraints import resolve_action_amount
-        val = resolve_action_amount(action, prices, self.tracker, self.db)
+        val = resolve_action_amount(action, prices, self.tracker, self.db,
+                                    market=self.market)
         return val if val is not None else 0.0
