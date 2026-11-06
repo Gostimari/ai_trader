@@ -400,13 +400,15 @@ class TestLiveModeGate:
         from fastapi.testclient import TestClient
         monkeypatch.setattr(srv, "db", db)
         c = TestClient(srv.app)
-        # real mode can only be entered via /api/go-live, never via the
-        # generic constraints save (which defaults to demo in the app)
+        # mode keys posted to /api/constraints are IGNORED: the mode can only
+        # change via /api/go-live and /api/go-demo, never via a settings save
         body = {"max_loss_pct": 20, "paper_trading": False,
                 "live_execution_mode": "onchain"}
         r = c.post("/api/constraints", json=body)
-        assert r.status_code == 400
-        assert "go-live" in r.json()["detail"]
+        assert r.status_code == 200
+        cc = load_constraints(db)
+        assert cc.paper_trading is False and cc.live_execution_mode == "demo"
+        assert cc.max_loss_pct == 20
 
     def test_go_live_requires_imported_wallet(self, db, monkeypatch):
         import app.server as srv
@@ -799,6 +801,7 @@ class TestUserTestGaps:
                             lambda k: k == "onchain_private_key")
         c0 = load_constraints(db)
         c0.paper_trading = False
+        c0.live_execution_mode = "onchain"
         db.set_setting("constraints", c0.to_json())
         monkeypatch.setattr(oc, "read_wallet_balances",
                            lambda s, chains=None, extra_contracts=None: {
@@ -857,6 +860,7 @@ class TestStablecoinLiquidationAndKey:
                             lambda k: k == "onchain_private_key")
         c0 = load_constraints(db)
         c0.paper_trading = False
+        c0.live_execution_mode = "onchain"
         db.set_setting("constraints", c0.to_json())
         monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None: {
             "evm": {"address": "0xabc", "chains": {
@@ -865,7 +869,10 @@ class TestStablecoinLiquidationAndKey:
             }}, "solana": None})
         class _FakeW:
             def __init__(self, s, c): self.cfg = {"router": "0xr"}
-            def swap_exact_tokens_for_tokens(self, a, b, amt):
+            def router_quote_min_out(self, a, b, amt, slip_pct):
+                return amt * (1 - slip_pct / 100)
+            def swap_exact_tokens_for_tokens(self, a, b, amt, min_amount_out=None):
+                assert min_amount_out is not None
                 return oc.TxResult(True, tx_id="0xtx", amount=amt)
         monkeypatch.setattr(oc, "EVMWallet", _FakeW)
         monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
@@ -3002,3 +3009,195 @@ class TestTestnetMode:
         d = db.list_decisions()[0]
         assert d["action"] == "bridge" and d["status"] == "rejected"
         assert "testnet mode is OFF" in d["reason"]
+
+
+class TestSettingsMergeOnSave:
+    def test_settings_save_preserves_real_mode(self, db, monkeypatch):
+        """Regression: the UI settings form posts only constraint fields;
+        saving it used to reset live_execution_mode/onchain_chain to their
+        defaults, silently kicking a real-mode user back to demo."""
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: True)
+        c = TestClient(srv.app)
+        assert c.post("/api/go-live", json={"confirm": True}).status_code == 200
+        r = c.post("/api/constraints", json={"risk_profile": "aggressive",
+                                             "max_position_pct": 30})
+        assert r.status_code == 200
+        cc = load_constraints(db)
+        assert cc.live_execution_mode == "onchain" and not cc.paper_trading
+        assert cc.risk_profile == "aggressive" and cc.max_position_pct == 30
+
+    def test_settings_save_preserves_unsent_fields(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        db.set_setting("constraints", Constraints(
+            onchain_chain="base", starting_capital_usd=250.0,
+            onchain_testnet=True, min_trade_usd=3.0).to_json())
+        c = TestClient(srv.app)
+        r = c.post("/api/constraints", json={"custom_prompt": "be careful"})
+        assert r.status_code == 200
+        cc = load_constraints(db)
+        assert cc.custom_prompt == "be careful"
+        assert cc.onchain_chain == "base"
+        assert cc.starting_capital_usd == 250.0
+        assert cc.onchain_testnet is True
+        assert cc.min_trade_usd == 3.0
+
+    def test_settings_save_cannot_touch_pause_or_emergency(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        db.set_setting("constraints", Constraints(
+            trading_paused=True, emergency_stopped=True).to_json())
+        c = TestClient(srv.app)
+        r = c.post("/api/constraints", json={"trading_paused": False,
+                                             "emergency_stopped": False})
+        assert r.status_code == 200
+        cc = load_constraints(db)
+        assert cc.trading_paused is True and cc.emergency_stopped is True
+
+
+class TestEmergencyLiquidation:
+    def test_demo_mode_liquidates_demo_wallet_to_usdc(self, db, monkeypatch):
+        """Regression: in demo mode the emergency button used to fall into
+        the REAL branch, read an empty on-chain wallet, and return ok with
+        nothing done."""
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {"ETH": 3000.0})
+        db.demo_set("base", "ETH", 0.02, "", is_gas=True)
+        db.demo_set("arc", "USDC", 50.0, "")
+        c = TestClient(srv.app)
+        r = c.post("/api/emergency-to-stablecoin")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "demo" and body["ok"] is True
+        sold = [x for x in body["results"] if x["symbol"] == "ETH"][0]
+        assert sold["ok"] is True
+        rows = {(x["chain"], x["asset"]): x["balance"] for x in db.demo_rows()}
+        assert rows[("base", "ETH")] == pytest.approx(0.0, abs=1e-9)
+        # 0.01985 ETH (balance minus the swap's own gas) * $3000
+        assert rows[("base", "USDC")] == pytest.approx((0.02 - 0.00015) * 3000, rel=1e-3)
+        assert rows[("arc", "USDC")] == 50.0
+        # emergency stop + pause are latched
+        cc = load_constraints(db)
+        assert cc.emergency_stopped and cc.trading_paused
+
+    def test_demo_mode_emergency_with_no_price_reports_failure(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        db.demo_set("base", "BRETT", 1000.0, "0x532f")
+        c = TestClient(srv.app)
+        r = c.post("/api/emergency-to-stablecoin")
+        body = r.json()
+        assert body["mode"] == "demo" and body["ok"] is False
+        assert "no price" in body["results"][0]["error"]
+        assert {(x["chain"], x["asset"]): x["balance"] for x in db.demo_rows()}[("base", "BRETT")] == 1000.0
+
+    def test_real_mode_emergency_passes_router_quote_min_out(self, db, monkeypatch):
+        """Regression: the real-mode emergency swap used to be called without
+        min_amount_out and was always refused by the slippage guard."""
+        import app.server as srv
+        import memicoin_core.onchain as onchain
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(onchain, "read_wallet_balances", lambda secrets: {
+            "evm": {"chains": {"base": {"tokens": [
+                {"contract": "0xabc", "symbol": "BRETT", "balance": 100.0}]}}},
+            "solana": None})
+        calls = {}
+
+        class _StubWallet:
+            def __init__(self, secrets, chain):
+                calls["chain"] = chain
+
+            def router_quote_min_out(self, tin, tout, amount, slip_pct):
+                calls["quote"] = (tin, tout, amount, slip_pct)
+                return 95.0
+
+            def swap_exact_tokens_for_tokens(self, tin, tout, amount, min_amount_out=None):
+                calls["swap"] = (tin, tout, amount, min_amount_out)
+                from memicoin_core.onchain import TxResult
+                return TxResult(True, tx_id="0xdead")
+
+        monkeypatch.setattr(onchain, "EVMWallet", _StubWallet)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: True)
+        db.set_setting("constraints", Constraints(
+            paper_trading=False, live_execution_mode="onchain").to_json())
+        c = TestClient(srv.app)
+        r = c.post("/api/emergency-to-stablecoin")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "real" and body["ok"] is True
+        assert calls["swap"][3] == 95.0
+        assert calls["quote"][3] == 5.0  # default onchain_slippage_pct
+
+
+class TestDemoGasTokenSale:
+    def test_swap_of_full_gas_balance_cannot_print_money(self, db):
+        """Regression: selling the gas token deducted gas first, then the
+        sold amount from the same row - the second deduction went negative
+        and was silently refused, so USDC was credited while the gas balance
+        stayed (repeatable free money)."""
+        from memicoin_core.demowallet import DemoWallet
+        db.demo_set("base", "ETH", 0.02, "", is_gas=True)
+        d = DemoWallet(db)
+        ok, _ = d.swap("base", "ETH", "", "USDC", "", 0.02, 3000.0, 1.0)
+        assert ok is False  # 0.02 ETH cannot cover 0.02 sold + gas
+        rows = {(x["chain"], x["asset"]): x["balance"] for x in db.demo_rows()}
+        assert rows[("base", "ETH")] == pytest.approx(0.02, abs=1e-9)
+        assert ("base", "USDC") not in rows
+
+    def test_swap_of_partial_gas_balance_debits_once(self, db):
+        from memicoin_core.demowallet import DemoWallet
+        db.demo_set("base", "ETH", 0.02, "", is_gas=True)
+        d = DemoWallet(db)
+        ok, _ = d.swap("base", "ETH", "", "USDC", "", 0.019, 3000.0, 1.0)
+        assert ok is True
+        rows = {(x["chain"], x["asset"]): x["balance"] for x in db.demo_rows()}
+        # sold 0.019 + 0.00015 gas leaves 0.00085 ETH
+        assert rows[("base", "ETH")] == pytest.approx(0.00085, abs=1e-9)
+        assert rows[("base", "USDC")] == pytest.approx(0.019 * 3000.0, rel=1e-3)
+
+
+class TestWatchlistIdResolution:
+    def test_non_address_watchlist_entry_not_filtered_by_stale_symbol(self, db, monkeypatch):
+        """Regression: the watchlist-id search reused the last symbol-search
+        loop variable as the symbol filter, so id entries (e.g.
+        circle-wrapped-btc) were matched against an unrelated ticker and
+        never resolved."""
+        from memicoin_core.market import MarketDataModule
+        m = MarketDataModule(db)
+        pair = {"chainId": "ethereum", "baseToken": {"symbol": "WBTC", "address": "0xdead"},
+                "priceUsd": "50000", "volume": {"h24": "1000"},
+                "liquidity": {"usd": "500000"}, "priceChange": {"h24": "1", "h7": "2"}}
+        monkeypatch.setattr(m, "_ds_search", lambda q: [pair] if q == "circle-wrapped-btc" else [])
+        monkeypatch.setattr(m, "_ds_token_pairs", lambda addrs: [])
+        monkeypatch.setattr(m, "_watchlist", lambda: ["circle-wrapped-btc"])
+        assets = m._fetch_dexscreener()[0]
+        assert any(a["asset"] == "WBTC" for a in assets)
+
+
+class TestSolanaKeyImport:
+    def test_wallet_import_accepts_base58_solana_key(self, db, monkeypatch):
+        """Regression: the import path called Keypair.from_base58_text, which
+        does not exist in solders (>=0.18) - every Solana key import crashed."""
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        from solders.keypair import Keypair
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "set", lambda k, v: None)
+        kp = Keypair.from_seed(bytes(32))
+        c = TestClient(srv.app)
+        r = c.post("/api/wallet/import", json={"private_key": str(kp),
+                                               "chain": "solana"})
+        assert r.status_code == 200, r.json()
+        assert r.json()["chain"] == "solana"
+        assert r.json()["address"] == str(kp.pubkey())

@@ -249,6 +249,29 @@ class EVMWallet:
             data = token_c.encode_abi("approve", args=[router, 2 ** 256 - 1])
             self._send(self._base_tx(token, data))
 
+    def router_quote_min_out(self, token_in: str, token_out: str,
+                             amount_in: float, slippage_pct: float) -> float:
+        """On-chain quote (router getAmountsOut) for a token->token swap,
+        lowered by the slippage tolerance. Raises when the router has no
+        direct pair for the path; callers fall back to market prices."""
+        router = self._router()
+        if not router:
+            raise RuntimeError(self._no_router_error())
+        abi = [{"constant": True,
+                "inputs": [{"name": "amountIn", "type": "uint256"},
+                           {"name": "path", "type": "address[]"}],
+                "name": "getAmountsOut",
+                "outputs": [{"name": "", "type": "uint256[]"}],
+                "type": "function"}]
+        dec_in = self._erc20_decimals(token_in)
+        path = [self.w3.to_checksum_address(token_in),
+                self.w3.to_checksum_address(token_out)]
+        c = self.w3.eth.contract(address=self.w3.to_checksum_address(router), abi=abi)
+        amounts = c.functions.getAmountsOut(int(amount_in * 10 ** dec_in), path).call()
+        dec_out = self._erc20_decimals(token_out)
+        expected = amounts[-1] / 10 ** dec_out
+        return expected * (1.0 - slippage_pct / 100.0)
+
     def swap_exact_tokens_for_tokens(self, token_in: str, token_out: str,
                                      amount_in: float,
                                      min_amount_out: float | None = None) -> TxResult:
@@ -378,7 +401,7 @@ class SolanaWallet:
                 nums = _json.loads(raw)
                 self._keypair = Keypair.from_bytes(bytes(nums))
             except Exception:
-                self._keypair = Keypair.from_base58_text(raw)
+                self._keypair = Keypair.from_base58_string(raw)
         return self._keypair
 
     def address(self) -> str:

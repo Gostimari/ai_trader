@@ -452,13 +452,22 @@ def cycles():
     return {"cycles": db.list_cycles()}
 
 
+# Fields that decide WHERE the bot trades and what it baseline-compares
+# against. They change only through their dedicated endpoints (/api/go-live,
+# /api/go-demo, /api/pause, /api/emergency-*), never through a settings save.
+MODE_CONTROL_KEYS = {"paper_trading", "live_execution_mode", "onchain_chain",
+                     "starting_capital_usd", "settings_version",
+                     "trading_paused", "emergency_stopped"}
+
+
 @app.post("/api/constraints")
 def set_constraints(c: Constraints):
     current = load_constraints(db)
-    entering_real = (not c.paper_trading and c.live_execution_mode == "onchain")
-    if entering_real and current.live_execution_mode != "onchain":
-        raise HTTPException(400, "Switching to real money requires explicit confirmation via /api/go-live")
-    db.set_setting("constraints", c.to_json())
+    data = current.to_json()
+    for k, v in c.model_dump(exclude_unset=True).items():
+        if k not in MODE_CONTROL_KEYS:
+            data[k] = v
+    db.set_setting("constraints", Constraints(**data).to_json())
     return {"ok": True}
 
 
@@ -519,7 +528,7 @@ def wallet_import(w: WalletImport):
             try:
                 kp = Keypair.from_bytes(bytes(_json.loads(w.private_key)))
             except Exception:
-                kp = Keypair.from_base58_text(w.private_key)
+                kp = Keypair.from_base58_string(w.private_key)
             secrets.set("onchain_solana_private_key", w.private_key)
             return {"ok": True, "chain": "solana", "address": str(kp.pubkey())}
         raise HTTPException(400, "Wallet type must be 'evm' or 'solana'.")
@@ -592,6 +601,63 @@ def emergency_to_stablecoin():
     db.set_setting("constraints", c.to_json())
     cycle_id = db.start_cycle()
     c = load_constraints(db)
+    if c.paper_trading:
+        pass  # paper liquidation handled below
+    elif c.live_execution_mode == "demo":
+        # DEMO mode: liquidate the demo wallet to USDC per chain (the block
+        # below used to fall through to the REAL branch and do nothing).
+        from memicoin_core.demowallet import DemoWallet, NATIVE_WRAPPED
+        try:
+            prices = market.get_prices()
+        except MarketDataError:
+            prices = {}
+        demo = DemoWallet(db)
+        results = []
+        for r in demo.rows():
+            if r["balance"] <= 0 or r["asset"] == "USDC":
+                continue
+            chain = r["chain"]
+            price = prices.get(r["asset"].upper(), 0.0)
+            if price <= 0 and r["is_gas"]:
+                if chain == "arc":
+                    price = 1.0
+                else:
+                    w = NATIVE_WRAPPED.get(chain)
+                    if w:
+                        try:
+                            price = market.get_prices_for_addresses([w]).get(w.lower(), 0.0)
+                        except Exception:
+                            price = 0.0
+            if price <= 0:
+                results.append({"chain": chain, "symbol": r["asset"], "ok": False,
+                                "target": "USDC",
+                                "error": "no price available - liquidate manually in Settings 3c"})
+                continue
+            amount = r["balance"]
+            if r["is_gas"]:
+                # the swap itself costs gas, which comes out of this same
+                # balance: only the remainder can be liquidated
+                amount = r["balance"] - demo.per_tx_gas(chain)
+                if amount <= 0:
+                    results.append({"chain": chain, "symbol": r["asset"], "ok": False,
+                                    "target": "USDC",
+                                    "error": "gas balance too small to cover the swap gas itself"})
+                    continue
+            ok, msg = demo.swap(chain, r["asset"], r["contract"], "USDC", "",
+                                amount, price, 1.0)
+            results.append({"chain": chain, "symbol": r["asset"], "ok": ok,
+                            "target": "USDC", "error": "" if ok else msg})
+        db.finish_cycle(cycle_id, "emergency", "", "",
+                        summary="Emergency liquidation to stablecoins (demo mode)")
+        for r in results:
+            db.add_decision({
+                "cycle_id": cycle_id, "action": "sell", "asset_in": r["symbol"],
+                "asset_out": "USDC", "status": "executed" if r["ok"] else "failed",
+                "reason": f"Emergency liquidation on {r['chain']} -> USDC: {r['error'] or 'sold'}",
+            })
+        ok_all = all(r["ok"] for r in results) if results else True
+        return {"ok": ok_all, "mode": "demo", "results": results}
+
     if not c.paper_trading:
         # REAL mode: sell via the imported wallet. Chains without a router
         # (e.g. Arc today) are reported as not-liquidatable, never faked.
@@ -611,7 +677,19 @@ def emergency_to_stablecoin():
             if chain in EVM_CHAINS and EVM_CHAINS[chain].get("router"):
                 w = EVMWallet(secrets, chain)
                 for t in entry.get("tokens", []):
-                    res = w.swap_exact_tokens_for_tokens(t["contract"], target_addr, t["balance"])
+                    # slippage bound: on-chain router quote first, market
+                    # prices as fallback; refuse to swap without either
+                    try:
+                        min_out = w.router_quote_min_out(
+                            t["contract"], target_addr, t["balance"],
+                            c.onchain_slippage_pct)
+                    except Exception:
+                        price = prices.get((t["symbol"] or "").upper(), 0.0)
+                        min_out = (t["balance"] * price
+                                   * (1.0 - c.onchain_slippage_pct / 100.0)) if price > 0 else None
+                    res = w.swap_exact_tokens_for_tokens(t["contract"], target_addr,
+                                                         t["balance"],
+                                                         min_amount_out=min_out)
                     results.append({"chain": chain, "symbol": t["symbol"], "ok": res.ok,
                                     "tx_id": res.tx_id, "target": target_label,
                                     "error": res.error})

@@ -110,15 +110,25 @@ class DemoWallet:
         if price_to <= 0:
             return False, f"no price for {to_asset}: cannot size the buy"
         bought = usd / price_to
-        # deduct gas from the gas row (fails if it would go negative -> refused)
         gas_cost = self.per_tx_gas(chain)
-        new_gas = self.db.demo_adjust(chain, self._gas_symbol(chain), -gas_cost,
-                                      is_gas=True)
-        if abs(new_gas - self.gas_balance(chain)) < 1e-12 and new_gas < gas_cost:
-            return False, f"gas deduction failed on {chain}"
-        # deduct sold asset, credit bought asset (cost-basis tracked)
-        self.db.demo_adjust(chain, from_asset, -from_amount, from_contract,
-                            usd_value=usd)
+        gas_sym = self._gas_symbol(chain)
+        row = self.db.demo_get(chain, from_asset, from_contract)
+        if row is not None and row["is_gas"]:
+            # selling the gas token: gas and proceeds leave the SAME row, so
+            # deduct once - deducting separately would push the row negative
+            # and be silently refused, crediting the output without debiting
+            # the input (free money).
+            if have + 1e-12 < from_amount + gas_cost:
+                return False, (f"insufficient {from_asset} on {chain}: "
+                               f"{have} < {from_amount} + {gas_cost} gas")
+            self.db.demo_adjust(chain, from_asset, -(from_amount + gas_cost),
+                                from_contract, is_gas=True, usd_value=usd)
+        else:
+            # gas_ok() above guarantees the gas row can cover one swap
+            self.db.demo_adjust(chain, gas_sym, -gas_cost, is_gas=True)
+            # deduct sold asset, credit bought asset (cost-basis tracked)
+            self.db.demo_adjust(chain, from_asset, -from_amount, from_contract,
+                                usd_value=usd)
         self.db.demo_adjust(chain, to_asset, bought, to_contract,
                             usd_value=usd)
         return True, (f"swapped {from_amount} {from_asset} -> {bought:.6f} {to_asset} "

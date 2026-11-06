@@ -574,7 +574,7 @@ async function main() {
   initWalletTab();
   initCyclePolling();
   checkSetup();
-  await Promise.all([loadState(), loadDecisions(), loadNews()]);
+  await Promise.all([loadState(), loadDecisions()]);
   setInterval(loadState, 60000);
   checkGasWarnings();
   setInterval(checkGasWarnings, 120000);

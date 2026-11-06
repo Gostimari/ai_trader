@@ -160,7 +160,8 @@ class MarketDataModule:
                     pairs = self._ds_search(entry)
                 except requests.RequestException:
                     continue
-                best = self._best_pair(pairs, wanted_chains=allowed, symbol=sym)
+                # no symbol filter here: the entry is an id/name, not a ticker
+                best = self._best_pair(pairs, wanted_chains=allowed)
                 if best:
                     self._add_ds_asset(assets, best)
 
