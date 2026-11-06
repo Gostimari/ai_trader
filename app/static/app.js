@@ -71,6 +71,7 @@ async function loadState() {
     renderWalletPortfolio(s.wallet_view, mode);
     $("#btn-resume").classList.toggle("hidden", !(s.emergency_stopped || s.trading_paused));
     fillSettings(s.constraints);
+    renderConstraintsInfo();
     refreshNotifications();
   } catch (e) { console.error(e); }
 }
@@ -137,21 +138,86 @@ function notifControls() {
   document.addEventListener("click", () => panel.classList.add("hidden"));
 }
 
+function setConsField(sel, val) {
+  const el = $(sel);
+  if (!el || el === document.activeElement) return;
+  el.value = val;
+}
+
 function fillSettings(c) {
-  $("#profit_target_pct").value = c.profit_target_pct ?? "";
-  $("#max_loss_pct").value = c.max_loss_pct;
-    $("#per_position_stop_pct").value = c.per_position_stop_pct ?? "";
-  $("#risk_profile").value = c.risk_profile;
-  $("#max_position_pct").value = c.max_position_pct;
-  $("#min_trade_usd").value = c.min_trade_usd ?? 1;
-  $("#onchain_slippage_pct").value = c.onchain_slippage_pct ?? 5;
-  $("#onchain_testnet").checked = !!c.onchain_testnet;
-  $("#onchain_chain").value = c.onchain_chain || "ethereum";
-  $("#allowed_chains").value = (c.allowed_chains || []).join(", ");
-  $("#decision_time_utc").value = c.decision_time_utc;
-  $("#custom_prompt").value = c.custom_prompt || "";
-  $("#autonomy_mode").value = c.autonomy_mode;
+  setConsField("#profit_target_pct", c.profit_target_pct ?? "");
+  setConsField("#max_loss_pct", c.max_loss_pct);
+  setConsField("#per_position_stop_pct", c.per_position_stop_pct ?? "");
+  setConsField("#risk_profile", c.risk_profile);
+  setConsField("#max_position_pct", c.max_position_pct);
+  setConsField("#min_trade_usd", c.min_trade_usd ?? 1);
+  setConsField("#onchain_slippage_pct", c.onchain_slippage_pct ?? 5);
+  const tn = $("#onchain_testnet");
+  if (tn && tn !== document.activeElement) tn.checked = !!c.onchain_testnet;
+  setConsField("#onchain_chain", c.onchain_chain || "ethereum");
+  setConsField("#allowed_chains", (c.allowed_chains || []).join(", "));
+  setConsField("#decision_time_utc", c.decision_time_utc);
+  setConsField("#custom_prompt", c.custom_prompt || "");
+  setConsField("#autonomy_mode", c.autonomy_mode);
   $("#full-control-warning").classList.toggle("hidden", c.autonomy_mode !== "full_control");
+}
+
+function collectConstraints() {
+  return {
+    profit_target_pct: $("#profit_target_pct").value === "" ? null : Number($("#profit_target_pct").value),
+    max_loss_pct: Number($("#max_loss_pct").value),
+    per_position_stop_pct: $("#per_position_stop_pct").value === "" ? null : Number($("#per_position_stop_pct").value),
+    risk_profile: $("#risk_profile").value,
+    max_position_pct: Number($("#max_position_pct").value),
+    min_trade_usd: Number($("#min_trade_usd").value),
+    onchain_slippage_pct: Number($("#onchain_slippage_pct").value),
+    onchain_testnet: $("#onchain_testnet").checked,
+    onchain_chain: $("#onchain_chain").value,
+    allowed_chains: $("#allowed_chains").value.split(",").map((s) => s.trim()).filter(Boolean),
+    decision_time_utc: $("#decision_time_utc").value || "00:00",
+    custom_prompt: $("#custom_prompt").value,
+    autonomy_mode: $("#autonomy_mode").value,
+  };
+}
+
+async function saveConstraints() {
+  const status = $("#cons-status");
+  try {
+    await api("/api/constraints", collectConstraints());
+    if (status) {
+      status.textContent = "\u2705 Saved";
+      status.classList.remove("err");
+      setTimeout(() => { status.textContent = ""; }, 4000);
+    }
+    loadState();
+  } catch (e) {
+    if (status) {
+      status.textContent = "\u26a0\ufe0f Save failed: " + e.message;
+      status.classList.add("err");
+    }
+  }
+}
+
+function renderConstraintsInfo() {
+  const el = $("#portfolio-constraints");
+  if (!el) return;
+  const c = _lastState?.constraints;
+  if (!c) { el.textContent = ""; return; }
+  const chip = (label, val) =>
+    `<span class="cons-chip">${label}: <b>${val}</b></span>`;
+  el.innerHTML =
+    chip("Max loss", (c.max_loss_pct ?? "\u2014") + "%") +
+    chip("Position stop", c.per_position_stop_pct != null && c.per_position_stop_pct > 0
+      ? c.per_position_stop_pct + "%" : "off") +
+    chip("Profit target", c.profit_target_pct != null ? c.profit_target_pct + "%" : "\u2014") +
+    chip("Max position", c.max_position_pct + "%") +
+    chip("Min trade", "$" + (c.min_trade_usd ?? 0)) +
+    chip("Slippage", (c.onchain_slippage_pct ?? 5) + "%") +
+    chip("Risk", c.risk_profile || "balanced") +
+    chip("Autonomy", c.autonomy_mode === "full_control" ? "FULL CONTROL" : "constrained") +
+    chip("Decision time", (c.decision_time_utc || "00:00") + " UTC") +
+    chip("Testnet", c.onchain_testnet ? "ON" : "off") +
+    chip("Chains", (c.allowed_chains || []).join(", "));
 }
 
 let _allDecisions = [];
@@ -280,26 +346,30 @@ function controls() {
   });
   $("#autonomy_mode").addEventListener("change", () =>
     $("#full-control-warning").classList.toggle("hidden", $("#autonomy_mode").value !== "full_control"));
-  $("#settings-form").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    const c = {
-      profit_target_pct: $("#profit_target_pct").value === "" ? null : Number($("#profit_target_pct").value),
-      max_loss_pct: Number($("#max_loss_pct").value),
-      per_position_stop_pct: $("#per_position_stop_pct").value === "" ? null : Number($("#per_position_stop_pct").value),
-      risk_profile: $("#risk_profile").value,
-      max_position_pct: Number($("#max_position_pct").value),
-      min_trade_usd: Number($("#min_trade_usd").value),
-      onchain_slippage_pct: Number($("#onchain_slippage_pct").value),
-      onchain_testnet: $("#onchain_testnet").checked,
-      onchain_chain: $("#onchain_chain").value,
-      allowed_chains: $("#allowed_chains").value.split(",").map((s) => s.trim()).filter(Boolean),
-      decision_time_utc: $("#decision_time_utc").value || "00:00",
-      custom_prompt: $("#custom_prompt").value,
-      autonomy_mode: $("#autonomy_mode").value,
-    };
-    await api("/api/constraints", c);
-    alert("Settings saved. Constraints are enforced in code on every action.");
-    loadState();
+  $("#settings-form").addEventListener("submit", (ev) => ev.preventDefault());
+  ["#profit_target_pct", "#max_loss_pct", "#per_position_stop_pct", "#risk_profile",
+   "#max_position_pct", "#min_trade_usd", "#onchain_slippage_pct", "#onchain_testnet",
+   "#onchain_chain", "#allowed_chains", "#decision_time_utc", "#custom_prompt",
+   "#autonomy_mode"].forEach((sel) => {
+    const el = $(sel);
+    if (!el) return;
+    el.addEventListener("change", () => {
+      const status = $("#cons-status");
+      if (!el.checkValidity()) {
+        if (status) {
+          status.textContent = "\u26a0\ufe0f Invalid value in " + el.id + " \u2014 not saved.";
+          status.classList.add("err");
+        }
+        return;
+      }
+      saveConstraints();
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && el.tagName !== "TEXTAREA") {
+        e.preventDefault();
+        el.blur();
+      }
+    });
   });
 }
 

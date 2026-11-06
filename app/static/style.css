@@ -55,6 +55,10 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 .gas-pill.bad { background: #4a1f24; color: #ff9aa5; }
 
 
+.cons-status { min-height: 1.2em; font-size: .85rem; color: #7ee2a8; }
+.cons-status.err { color: #ff9aa5; }
+.cons-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.cons-chip { display: inline-block; border: 1px solid var(--border); border-radius: 12px; padding: 3px 10px; font-size: .8rem; }
 .news-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .news-item .hint { margin: 2px 0 0 0; font-size: .75rem; }
 .news-item a { color: var(--accent); text-decoration: none; }

@@ -401,6 +401,27 @@ class TestMarketRemovedFromUI:
         main_idx = js.index("async function main()")
         assert "notifControls()" in js[main_idx:]
 
+    def test_constraints_autosave_and_portfolio_info(self):
+        base = os.path.join(os.path.dirname(__file__), "..", "app", "static")
+        html = open(os.path.join(base, "index.html")).read()
+        assert 'id="cons-status"' in html
+        assert 'id="portfolio-constraints"' in html
+        form = html[html.index('id="settings-form"'):]
+        form = form[:form.index("</form>")]
+        assert 'type="submit"' not in form and "Save constraints" not in form
+        js = open(os.path.join(base, "app.js")).read()
+        assert "function collectConstraints()" in js
+        assert "function saveConstraints()" in js
+        assert "function renderConstraintsInfo()" in js
+        assert 'alert("Settings saved' not in js
+        assert 'addEventListener("submit", (ev) => ev.preventDefault())' in js
+        assert 'el.addEventListener("change"' in js
+        assert "el.blur();" in js
+        state_idx = js.index("async function loadState()")
+        assert "renderConstraintsInfo();" in js[state_idx:]
+        css = open(os.path.join(base, "style.css")).read()
+        assert ".cons-status" in css and ".cons-chip" in css
+
     def test_decision_feed_filters_are_wired(self):
         html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
         for el in ("df-search", "df-action", "df-status", "df-asset", "df-from", "df-to",
@@ -3256,6 +3277,20 @@ class TestSettingsMergeOnSave:
         assert cc.starting_capital_usd == 250.0
         assert cc.onchain_testnet is True
         assert cc.min_trade_usd == 3.0
+
+    def test_min_trade_usd_zero_saves(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/constraints", json={"min_trade_usd": 0})
+        assert r.status_code == 200
+        cc = load_constraints(db)
+        assert cc.min_trade_usd == 0.0
+        r2 = c.post("/api/constraints", json={"min_trade_usd": 0, "custom_prompt": "x"})
+        assert r2.status_code == 200
+        cc = load_constraints(db)
+        assert cc.min_trade_usd == 0.0 and cc.custom_prompt == "x"
 
     def test_settings_save_cannot_touch_pause_or_emergency(self, db, monkeypatch):
         import app.server as srv
