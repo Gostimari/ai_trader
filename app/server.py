@@ -42,10 +42,14 @@ def make_engine() -> DecisionEngine:
 
 
 scheduler = DailyScheduler(db, make_engine)
-scheduler.start()
 
 app = FastAPI(title="MemeCoin AI Trader", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+
+
+@app.on_event("startup")
+def _start_scheduler():
+    scheduler.start()
 
 
 @app.get("/")
