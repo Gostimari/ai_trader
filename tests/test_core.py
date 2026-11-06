@@ -1599,6 +1599,41 @@ class TestOnchainPortfolioContext:
             {}, v.tracker, db, live_holdings=v.live_holdings)
         assert qty == pytest.approx(500.0)
 
+    def test_prompt_shows_per_swap_gas_usd(self, db, monkeypatch):
+        import memicoin_core.onchain as oc
+        class _W:
+            def __init__(self, secrets, chain):
+                self.chain = chain
+            def investable_native(self):
+                return 0.000379
+            def gas_reserve(self):
+                return 0.00015
+            def estimated_gas_cost(self):
+                return 0.005 if self.chain == "arc" else 0.00015
+        monkeypatch.setattr(oc, "EVMWallet", _W)
+        engine = self._engine(db)
+        ctx = engine._build_context({"ETH": 3000.0}, {}, {"chains": {}})
+        assert "each swap costs ~0.000150 ETH/swap (~$0.4500)" in ctx
+        assert "each swap costs ~0.005000 USDC/swap (~$0.0050)" in ctx
+        assert "weigh it against the trade size" in ctx
+
+    def test_demo_gas_note_shows_usd_cost(self, db, monkeypatch):
+        db.demo_set("base", "ETH", 0.02, is_gas=True)
+        db.demo_set("arc", "USDC", 50.0, is_gas=True)
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        prices = {"USDC": 1.0}
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda contracts: {"0x4200000000000000000000000000000000000006": 2500.0})
+        summary = engine._demo_portfolio_summary(prices)
+        notes = [e["note"] for es in summary["chains"].values()
+                 for e in es if e.get("_meta")]
+        base_note = next(n for n in notes if "base" in n)
+        arc_note = next(n for n in notes if "arc" in n)
+        assert "one swap costs ~0.000150 = ~$0.3750" in base_note
+        assert "one swap costs ~0.005000 = ~$0.0050" in arc_note
+        db.demo_clear()
+
 
 class TestTokenDiscovery:
     def test_etherscan_v2_parse(self, monkeypatch):

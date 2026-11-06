@@ -524,14 +524,23 @@ class DecisionEngine:
                      "value_usd": r["balance"] * p}
             by_chain.setdefault(r["chain"], []).append(entry)
             total += entry["value_usd"]
-        # investable gas per chain (balance minus reserve)
+        # investable gas per chain (balance minus reserve), with the
+        # per-swap fee valued in USD so the AI can weigh it against
+        # small trade sizes
         for chain, entries in by_chain.items():
             inv = demo.investable_gas(chain)
             reserve = demo.gas_reserve(chain)
             per_swap = demo.per_tx_gas(chain)
-            entries.append({"_meta": True, "note":
-                            f"investable gas on {chain}: {inv:.6f} "
-                            f"(reserve {reserve:.6f} = {per_swap:.6f}/tx kept for fees)"})
+            unit = 0.0
+            for e in entries:
+                if e.get("is_gas") and e["quantity"] > 0:
+                    unit = e["value_usd"] / e["quantity"]
+                    break
+            note = (f"investable gas on {chain}: {inv:.6f} "
+                    f"(reserve {reserve:.6f} = {per_swap:.6f}/tx kept for fees)")
+            if unit > 0:
+                note += f"; one swap costs ~{per_swap:.6f} = ~${per_swap * unit:.4f}"
+            entries.append({"_meta": True, "note": note})
         return {"demo_wallet": True, "chains": by_chain,
                 "total_value_usd": total,
                 "note": "Portfolio is the DEMO wallet. Fund buys with USDC "
@@ -668,22 +677,46 @@ class DecisionEngine:
                 and self._onchain_secrets.has("onchain_private_key"):
             try:
                 from .onchain import EVMWallet, EVM_CHAINS
+                from .demowallet import NATIVE_WRAPPED
+                wrapped = [NATIVE_WRAPPED[ch] for ch in EVM_CHAINS
+                           if ch != "arc" and ch in NATIVE_WRAPPED]
+                addr_p: dict = {}
+                if wrapped:
+                    try:
+                        addr_p = self.market.get_prices_for_addresses(wrapped)
+                    except Exception:
+                        addr_p = {}
                 lines = []
                 for chain in EVM_CHAINS:
                     if EVM_CHAINS[chain].get("testnet") and not self.constraints.onchain_testnet:
                         continue  # testnet RPCs only in testnet mode
                     try:
                         w = EVMWallet(self._onchain_secrets, chain)
+                        sym = EVM_CHAINS[chain].get("native_symbol", "ETH")
+                        per_tx = w.estimated_gas_cost()
+                        if sym == "USDC":
+                            p = 1.0
+                        else:
+                            p = prices.get(sym.upper(), 0.0)
+                            if p <= 0:
+                                waddr = NATIVE_WRAPPED.get(chain)
+                                p = addr_p.get(waddr.lower(), 0.0) if waddr else 0.0
+                        fee = f"~{per_tx:.6f} {sym}/swap"
+                        if p > 0:
+                            fee += f" (~${per_tx * p:.4f})"
                         lines.append(
-                            f"  {chain}: {w.investable_native():.6f} {EVM_CHAINS[chain].get('native_symbol', 'ETH')} "
-                            f"investable (reserve {w.gas_reserve():.6f} kept for gas)")
+                            f"  {chain}: {w.investable_native():.6f} {sym} "
+                            f"investable (reserve {w.gas_reserve():.6f} kept for gas; "
+                            f"each swap costs {fee})")
                     except Exception:
                         continue
                 if lines:
                     parts.append("## Gas reserve (NEVER spend into the reserve)\n"
                                  "A gas reserve is held back on each chain for future "
                                  "transaction fees. Only the 'investable' amount may "
-                                 "be traded:\n" + "\n".join(lines))
+                                 "be traded. Every swap also PAYS the per-swap fee "
+                                 "shown - weigh it against the trade size and avoid "
+                                 "trades where fees eat a large share:\n" + "\n".join(lines))
             except Exception:
                 pass
         market_rows = [
