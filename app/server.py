@@ -831,10 +831,13 @@ def latest_cycle():
 @app.get("/api/setup-status")
 def setup_status():
     """First-run guidance: which integrations are configured (booleans only)."""
+    c = load_constraints(db)
+    mode = "real" if (not c.paper_trading and c.live_execution_mode == "onchain") else "demo"
     return {
         "mistral_key": bool(os.environ.get("MISTRAL_API_KEY")) or secrets.has("mistral_api_key"),
         "wallet": secrets.has("onchain_private_key") or secrets.has("onchain_solana_private_key"),
-        "paper_trading": load_constraints(db).paper_trading,
+        "paper_trading": c.paper_trading,
+        "mode": mode,
     }
 
 

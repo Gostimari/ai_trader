@@ -10,17 +10,13 @@
 <header>
   <h1>🐕 MemeCoin AI Trader</h1>
   <div id="mode-badge" class="badge">PAPER TRADING</div>
-  <div id="status-badges"></div>
+  <button id="mode-warn" class="notif-btn hidden" title="Active warnings" type="button">⚠️<span id="mode-warn-count" class="notif-count hidden"></span></button>
+  <div class="header-spacer"></div>
+  <button id="btn-bell" class="notif-btn" title="Notifications" type="button">🔔<span id="notif-count" class="notif-count hidden"></span></button>
+  <div id="notif-panel" class="notif-panel hidden"></div>
 </header>
 
-<div id="setup-hint" class="setup-hint hidden"></div>
-<div id="gas-warning" class="gas-warning hidden"></div>
 <div id="cycle-banner" class="banner hidden"></div>
-<div class="disclaimer">
-  ⚠️ Meme coins are extremely volatile. This software does not guarantee profit.
-  Paper-trading mode simulates trades against real market data with virtual funds.
-</div>
-
 <nav>
   <button data-tab="portfolio" class="tab active">Portfolio</button>
   <button data-tab="decisions" class="tab">Decision Feed</button>

@@ -59,22 +59,73 @@ function renderWalletPortfolio(w, mode) {
     || `<tr><td colspan="6" class="hint">Wallet empty.</td></tr>`;
 }
 
+let _lastState = null, _setupStatus = null, _gasWarnings = [];
+
 async function loadState() {
   try {
     const s = await api("/api/state");
+    _lastState = s;
     const mode = s.mode || "demo";
     $("#mode-badge").textContent = mode === "demo" ? "DEMO WALLET" : "LIVE TRADING";
     $("#mode-badge").classList.toggle("live", mode === "real");
     renderWalletPortfolio(s.wallet_view, mode);
-    const badges = [];
-    if (s.trading_paused) badges.push("\u23f8 PAUSED");
-    if (s.emergency_stopped) badges.push("\ud83d\uded1 EMERGENCY STOP");
-    if (s.constraints?.onchain_testnet && s.mode === "real")
-      badges.push("\ud83e\uddea TESTNET \u2014 faucet funds only");
-    $("#status-badges").innerHTML = badges.map((b) => `<span class="badge live">${b}</span>`).join("");
     $("#btn-resume").classList.toggle("hidden", !(s.emergency_stopped || s.trading_paused));
     fillSettings(s.constraints);
+    refreshNotifications();
   } catch (e) { console.error(e); }
+}
+
+function collectNotifications() {
+  const items = [];
+  if (_setupStatus && !_setupStatus.mistral_key)
+    items.push({ icon: "\u2699", severity: "critical",
+      text: "No AI key configured \u2014 the app cannot make decisions. Paste your Mistral key in Settings \u00b7 1b AI Provider Key." });
+  if (_setupStatus && !_setupStatus.wallet && _lastState?.mode === "real")
+    items.push({ icon: "\U0001F45B", severity: "critical",
+      text: "Real-money mode is on but no wallet is imported \u2014 trading will fail until you import a key in Settings." });
+  for (const w of _gasWarnings || [])
+    items.push({ icon: "\u26fd", severity: w.level === "empty" || w.level === "critical" ? "critical" : "warning",
+      text: `Gas reserve ${w.level} on ${w.chain}: ${w.hint}` });
+  if (_lastState?.emergency_stopped)
+    items.push({ icon: "\U0001F6D1", severity: "critical", text: "EMERGENCY STOP active \u2014 all trading is halted." });
+  else if (_lastState?.trading_paused)
+    items.push({ icon: "\u23f8", severity: "warning", text: "Trading is paused." });
+  if (_lastState?.constraints?.onchain_testnet && _lastState?.mode === "real")
+    items.push({ icon: "\U0001F9EA", severity: "info", text: "Testnet mode \u2014 faucet funds only." });
+  if (_lastState?.constraints?.autonomy_mode === "full_control")
+    items.push({ icon: "\U0001F916", severity: "warning", text: "Full-control autonomy mode is active \u2014 the AI decides without per-action confirmation." });
+  return items;
+}
+
+function renderNotifications() {
+  const items = collectNotifications();
+  const count = items.filter((n) => n.severity !== "info").length;
+  const setBadge = (el, n) => {
+    if (!el) return;
+    el.textContent = n > 9 ? "9+" : String(n);
+    el.classList.toggle("hidden", n === 0);
+  };
+  setBadge($("#notif-count"), items.length);
+  setBadge($("#mode-warn-count"), count);
+  $("#mode-warn")?.classList.toggle("hidden", count === 0);
+  const panel = $("#notif-panel");
+  if (!panel) return;
+  panel.innerHTML = items.length
+    ? `<div class="notif-title">Notifications (${items.length})</div>` + items.map((n) => `
+      <div class="notif-item ${n.severity}"><span class="notif-icon">${n.icon}</span><span>${n.text}</span></div>`).join("")
+    : '<div class="notif-empty">\u2705 No active notifications.</div>';
+}
+
+function refreshNotifications() { renderNotifications(); }
+
+function notifControls() {
+  const panel = $("#notif-panel");
+  if (!panel) return;
+  const toggle = (ev) => { ev.stopPropagation(); panel.classList.toggle("hidden"); };
+  $("#btn-bell")?.addEventListener("click", toggle);
+  $("#mode-warn")?.addEventListener("click", toggle);
+  panel.addEventListener("click", (ev) => ev.stopPropagation());
+  document.addEventListener("click", () => panel.classList.add("hidden"));
 }
 
 function fillSettings(c) {
@@ -398,21 +449,11 @@ function modeControls() {
 }
 
 
-function renderGasWarnings(gas) {
-  const el = $("#gas-warning");
-  if (!el) return;
-  const warns = gas || [];
-  if (!warns.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
-  const worst = warns.some((w) => w.level === "empty" || w.level === "critical") ? "critical" : "low";
-  el.className = "gas-warning " + worst;
-  el.innerHTML = "\u26fd Gas reserve warnings:<br>" +
-    warns.map((w) => `<div class="chain-line">\u2022 <b>${w.chain}</b>: ${w.hint}</div>`).join("");
-}
-
 async function checkGasWarnings() {
   try {
     const w = await api("/api/wallet/balances");
-    renderGasWarnings(w.gas_warnings);
+    _gasWarnings = w.gas_warnings || [];
+    refreshNotifications();
   } catch (e) { /* ignore */ }
 }
 
@@ -504,16 +545,8 @@ function initCyclePolling() {
 
 async function checkSetup() {
   try {
-    const s = await api("/api/setup-status");
-    const el = $("#setup-hint");
-    if (!s.mistral_key) {
-      el.innerHTML = "⚠️ No AI key configured: the app cannot make decisions. " +
-        "Go to Settings \u00b7 1b AI Provider Key and paste your Mistral key (console.mistral.ai).";
-      el.classList.remove("hidden");
-    } else if (!s.wallet && !s.paper_trading) {
-      el.textContent = "Real-money mode is on but no wallet is imported — trading will fail until you import a key in Settings.";
-      el.classList.remove("hidden");
-    }
+    _setupStatus = await api("/api/setup-status");
+    refreshNotifications();
   } catch (e) { /* ignore */ }
 }
 
@@ -683,6 +716,7 @@ async function main() {
   refreshModeUI();
   initWalletTab();
   initCyclePolling();
+  notifControls();
   checkSetup();
   await Promise.all([loadState(), loadDecisions(), loadNews()]);
   setInterval(loadState, 60000);

@@ -367,6 +367,22 @@ class TestMarketRemovedFromUI:
         controls_body = js[controls_idx:js.index("#btn-pause")]
         assert "loadNews" not in controls_body
 
+    def test_notification_center_wired_and_disclaimer_removed(self):
+        html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
+        assert "extremely volatile" not in html
+        assert 'id="disclaimer"' not in html and 'class="disclaimer"' not in html
+        assert 'id="setup-hint"' not in html and 'id="gas-warning"' not in html
+        assert 'id="status-badges"' not in html
+        for el in ("btn-bell", "notif-count", "notif-panel", "mode-warn", "mode-warn-count"):
+            assert f'id="{el}"' in html
+        js = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "app.js")).read()
+        assert "function collectNotifications()" in js
+        assert "function renderNotifications()" in js
+        assert "function notifControls()" in js
+        assert 'id="status-badges"' not in js and 'id="setup-hint"' not in js
+        main_idx = js.index("async function main()")
+        assert "notifControls()" in js[main_idx:]
+
     def test_decision_feed_filters_are_wired(self):
         html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
         for el in ("df-search", "df-action", "df-status", "df-asset", "df-from", "df-to",
@@ -772,6 +788,26 @@ class TestUserTestGaps:
         d = c.get("/api/setup-status").json()
         assert d["mistral_key"] is False
         assert isinstance(d["wallet"], bool)
+        assert d["mode"] == "demo"
+        assert d["paper_trading"] is False
+
+    def test_setup_status_mode_demo(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        db.set_setting("live_execution_mode", "demo")
+        c = TestClient(srv.app)
+        assert c.get("/api/setup-status").json()["mode"] == "demo"
+
+    def test_setup_status_mode_real(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c0 = load_constraints(db)
+        c0.live_execution_mode = "onchain"
+        db.set_setting("constraints", c0.to_json())
+        c = TestClient(srv.app)
+        assert c.get("/api/setup-status").json()["mode"] == "real"
 
     def test_latest_cycle_endpoint(self, db, monkeypatch):
         import app.server as srv
