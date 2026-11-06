@@ -607,3 +607,40 @@ def read_wallet_balances(secrets: SecretStore, chains: list[str] | None = None,
                 out["error"] = str(e)
     out["evm"] = evm
     return out
+
+
+def build_extra_contracts(secrets: SecretStore, market=None) -> dict[str, list[dict]]:
+    """Everything the wallet read should track beyond the built-in token list:
+    the user's watchlist contracts (from the market asset map) PLUS automatic
+    discovery of every ERC-20 the imported wallet ever transacted (free
+    Etherscan V2 key). Returns {chain: [{"address": .., "symbol": ..}]}.
+    Actual balances are always read on-chain afterwards; discovery only
+    supplies the candidate contracts."""
+    extra: dict[str, list[dict]] = {}
+    try:
+        for a in (market.get_asset_map() or {}).values() if market else []:
+            contract = a.get("contract") or ""
+            chain = a.get("chain") or ""
+            if contract.startswith("0x") and len(contract) == 42 and chain:
+                bucket = extra.setdefault(chain, [])
+                if not any(t["address"].lower() == contract.lower() for t in bucket):
+                    bucket.append({"address": contract, "symbol": a["asset"]})
+    except Exception:
+        pass
+    try:
+        if secrets.has("onchain_private_key") and secrets.has("etherscan_api_key"):
+            from web3 import Web3
+            addr = Web3().eth.account.from_key(
+                secrets.get("onchain_private_key")).address
+            from .discovery import discover_evm_tokens
+            discovered = discover_evm_tokens(
+                addr, secrets.get("etherscan_api_key")) or {}
+            for chain, toks in discovered.items():
+                bucket = extra.setdefault(chain, [])
+                known = {t["address"].lower() for t in bucket}
+                for t in toks:
+                    if t["address"].lower() not in known:
+                        bucket.append(t)
+    except Exception:
+        pass
+    return extra

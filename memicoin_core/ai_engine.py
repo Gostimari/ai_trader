@@ -542,9 +542,15 @@ class DecisionEngine:
         """Portfolio state built from the IMPORTED WALLET (real mode) — what
         the AI must see in onchain mode, so it can only trade assets that
         actually exist on-chain right now."""
-        from .onchain import read_wallet_balances, EVM_CHAINS
+        from .onchain import (read_wallet_balances, EVM_CHAINS,
+                              build_extra_contracts)
         from .demowallet import NATIVE_WRAPPED
-        raw = read_wallet_balances(self._onchain_secrets) or {}
+        try:
+            extra = build_extra_contracts(self._onchain_secrets, self.market)
+        except Exception:
+            extra = None
+        raw = read_wallet_balances(self._onchain_secrets,
+                                   extra_contracts=extra) or {}
         evm = raw.get("evm") or {}
         # batch-price every token contract and wrapped native once
         contracts: list[str] = []
@@ -594,7 +600,7 @@ class DecisionEngine:
                 v = q * _price(t.get("symbol"), chain, False, t.get("contract", ""))
                 rows.append({"asset": t.get("symbol") or (t.get("contract") or "?")[:8],
                              "chain": chain, "quantity": q, "is_gas": False,
-                             "value_usd": v})
+                             "value_usd": v, "contract": t.get("contract", "")})
             if rows:
                 by_chain[chain] = rows
                 total += sum(r["value_usd"] for r in rows)
@@ -611,19 +617,28 @@ class DecisionEngine:
                 v = q * _price(t.get("symbol"), "solana", False, t.get("contract", ""))
                 rows.append({"asset": t.get("symbol") or (t.get("contract") or "?")[:8],
                              "chain": "solana", "quantity": q, "is_gas": False,
-                             "value_usd": v})
+                             "value_usd": v, "contract": t.get("contract", "")})
             if rows:
                 by_chain["solana"] = rows
                 total += sum(r["value_usd"] for r in rows)
-        holdings = [{"asset": r["asset"], "chain": r["chain"],
+        holdings = []
+        for rows in by_chain.values():
+            for r in rows:
+                if r["quantity"] <= 0:
+                    continue
+                h = {"asset": r["asset"], "chain": r["chain"],
                      "quantity": r["quantity"], "is_gas": r["is_gas"]}
-                    for rows in by_chain.values() for r in rows if r["quantity"] > 0]
+                if r.get("contract"):
+                    h["contract"] = r["contract"]
+                holdings.append(h)
         summary = {"real_wallet": True, "chains": by_chain, "holdings": holdings,
                    "total_value_usd": total,
                    "note": "Portfolio is the IMPORTED WALLET (real funds). You can "
                            "only SELL or SWAP assets listed above with a positive "
-                           "quantity. Fund buys with the investable gas-token "
-                           "amounts shown in the Gas reserve section."}
+                           "quantity, referencing tokens by their contract address "
+                           "(on-chain mode requires contracts). Fund buys with the "
+                           "investable gas-token amounts shown in the Gas reserve "
+                           "section."}
         if raw.get("error"):
             summary["warning"] = f"wallet read incomplete: {raw['error']}"
         return summary
@@ -1038,11 +1053,17 @@ class DecisionEngine:
                     f"swaps on {chain} are refused while the toggle disagrees "
                     f"(use {'sepolia or base-sepolia' if self.constraints.onchain_testnet else 'a mainnet chain'})")
         # SAFETY FIRST: the asset identifier must be a contract/mint address
-        # before anything else (including gas checks) runs.
+        # before anything else (including gas checks) runs. Tickertapes are
+        # resolved from the validator's annotation, the live holdings, then
+        # the market asset map; only an unresolvable asset is refused.
         token = action["asset"]
         if not self._looks_like_address(token):
-            return (f"on-chain swap needs a token contract address for {token!r}; "
-                    f"the AI must provide contract/mint addresses in on-chain mode")
+            token = self._resolve_contract(token, action)
+            if not token:
+                return (f"on-chain swap needs a token contract address for "
+                        f"{action['asset']!r}; not found in market data, "
+                        f"watchlist or wallet holdings")
+            action["_contract"] = token
         wallet = wallet_for(chain, self._onchain_secrets)
         if not wallet.configured():
             return f"on-chain mode selected but no {chain} private key imported"
@@ -1161,6 +1182,25 @@ class DecisionEngine:
     def _looks_like_address(s: str) -> bool:
         return bool(s) and (s.startswith("0x") and len(s) == 42 or len(s) in (32, 44) and not s.isupper() == s.islower())
 
+    def _resolve_contract(self, symbol: str, action: dict) -> str:
+        """Ticker -> contract address: the validator's annotation first, then
+        the wallet's live holdings (discovered tokens), then the market asset
+        map. Empty string when nothing resolves."""
+        cand = action.get("_contract")
+        if cand and self._looks_like_address(cand):
+            return cand
+        sym = (symbol or "").upper()
+        for r in (getattr(self.validator, "live_holdings", None) or []):
+            if r.get("asset", "").upper() == sym and r.get("contract"):
+                return r["contract"]
+        try:
+            for a in self.market.get_asset_map().values():
+                if a.get("asset", "").upper() == sym and a.get("contract"):
+                    return a["contract"]
+        except Exception:
+            pass
+        return ""
+
     @staticmethod
     def _native_mint(chain: str) -> str:
         return "So11111111111111111111111111111111111111112" if chain == "solana" else ""
@@ -1183,7 +1223,8 @@ class DecisionEngine:
         price the gas token via wrapped contracts, and without the market
         they resolve to 0 here after passing validation."""
         from .constraints import resolve_action_amount
-        val = resolve_action_amount(action, prices, self.tracker, self.db,
-                                    market=self.market,
-                                    live_total_usd=live_total_usd)
+        val = resolve_action_amount(
+            action, prices, self.tracker, self.db,
+            market=self.market, live_total_usd=live_total_usd,
+            live_holdings=getattr(self.validator, "live_holdings", None))
         return val if val is not None else 0.0

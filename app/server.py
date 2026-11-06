@@ -273,38 +273,11 @@ def wallet_balances():
     if not (secrets.has("onchain_private_key") or secrets.has("onchain_solana_private_key")):
         return {"configured": False, "chains": {}, "total_usd": 0.0}
     from memicoin_core.onchain import read_wallet_balances
-    # 1) watchlist contracts (priced + explicitly tracked by the user)
-    extra_contracts: dict[str, list[dict]] = {}
-    try:
-        for a in market.get_asset_map().values():
-            contract = a.get("contract") or ""
-            chain = a.get("chain") or ""
-            if contract.startswith("0x") and len(contract) == 42 and chain:
-                extra_contracts.setdefault(chain, []).append(
-                    {"address": contract, "symbol": a["asset"]})
-    except MarketDataError:
-        pass
-    # 2) AUTOMATIC DISCOVERY: every token the wallet ever transacted
-    #    (Etherscan-family V2 key, if provided). Merged with the watchlist;
-    #    actual balances are still read on-chain afterwards.
-    evm_addr = None
-    try:
-        if secrets.has("onchain_private_key"):
-            from web3 import Web3
-            evm_addr = Web3().eth.account.from_key(
-                secrets.get("onchain_private_key")).address
-            if secrets.has("etherscan_api_key"):
-                from memicoin_core.discovery import discover_evm_tokens
-                discovered = discover_evm_tokens(
-                    evm_addr, secrets.get("etherscan_api_key")) or {}
-                for chain, toks in discovered.items():
-                    bucket = extra_contracts.setdefault(chain, [])
-                    known = {t["address"].lower() for t in bucket}
-                    for t in toks:
-                        if t["address"].lower() not in known:
-                            bucket.append(t)
-    except Exception:
-        pass
+    # watchlist contracts + AUTOMATIC DISCOVERY (Etherscan V2 key, if
+    # provided): every token the wallet ever transacted. Actual balances
+    # are still read on-chain afterwards.
+    from memicoin_core.onchain import build_extra_contracts
+    extra_contracts = build_extra_contracts(secrets, market)
     raw = read_wallet_balances(secrets, extra_contracts=extra_contracts)
     # 3) Solana: token accounts are directly enumerable, no key needed
     sol = raw.get("solana")

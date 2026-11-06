@@ -21,7 +21,8 @@ class ValidationResult:
 
 def resolve_action_amount(action: dict, prices: dict[str, float],
                            tracker, db, market=None,
-                           live_total_usd: float | None = None) -> float | None:
+                           live_total_usd: float | None = None,
+                           live_holdings: list[dict] | None = None) -> float | None:
     """Resolve an action's amount_or_percent into absolute asset units.
     Raises nothing; returns None when unresolvable."""
     raw = action.get("amount")
@@ -111,6 +112,15 @@ def resolve_action_amount(action: dict, prices: dict[str, float],
             for r in demo.rows():
                 if r["asset"] == asset and r["balance"] > 0:
                     return r["balance"] * pct
+        # onchain mode: sells resolve against the imported wallet holding
+        # (matched by symbol OR contract, however the AI named the asset)
+        if live_holdings is not None:
+            q = sum(r["quantity"] for r in live_holdings
+                    if (r.get("asset") == asset
+                        or r.get("contract", "").lower() == asset.lower())
+                    and r.get("quantity", 0) > 0)
+            if q > 0:
+                return q * pct
         return None
     return pos["quantity"] * pct
 
@@ -415,8 +425,11 @@ class ConstraintValidator:
         portfolio otherwise."""
         if (self.constraints.live_execution_mode == "onchain"
                 and self.live_holdings is not None):
+            al = (asset or "").lower()
             return sum(r["quantity"] for r in self.live_holdings
-                       if r["asset"] == asset and r["quantity"] > 0)
+                       if (r.get("asset") == asset
+                           or r.get("contract", "").lower() == al)
+                       and r["quantity"] > 0)
         if getattr(self.db, "demo_mode_percent", False):
             from .demowallet import DemoWallet
             return sum(r["balance"] for r in DemoWallet(self.db).rows()
@@ -445,6 +458,15 @@ class ConstraintValidator:
         if asset == STABLECOIN:
             return ValidationResult(True, "")
         info = known_assets.get(asset)
+        if info is None and (self.constraints.live_execution_mode == "onchain"
+                             and self.live_holdings is not None):
+            al = (asset or "").lower()
+            row = next((r for r in self.live_holdings
+                        if r.get("asset") == asset
+                        or r.get("contract", "").lower() == al), None)
+            if row is not None:
+                info = {"asset": row["asset"], "chain": row["chain"],
+                        "contract": row.get("contract", "")}
         if info is None:
             return ValidationResult(False, f"Asset {asset!r} not found in market data.")
         chain = info.get("chain") or info.get("platform") or ""
@@ -478,4 +500,5 @@ class ConstraintValidator:
         sells/swaps = % of current holdings of the asset."""
         return resolve_action_amount(action, prices, self.tracker, self.db,
                                      market=self._market,
-                                     live_total_usd=self.live_wallet_total)
+                                     live_total_usd=self.live_wallet_total,
+                                     live_holdings=self.live_holdings)

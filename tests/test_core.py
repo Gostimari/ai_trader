@@ -1532,6 +1532,73 @@ class TestOnchainPortfolioContext:
         css = open(os.path.join(base, "style.css")).read()
         assert ".banner" not in css
 
+    def test_summary_includes_discovered_tokens(self, db, monkeypatch):
+        import memicoin_core.onchain as oc
+        TYBG = "0x" + "ab" * 20
+        captured = {}
+        def fake_read(s, chains=None, extra_contracts=None):
+            captured["extra"] = extra_contracts
+            return {"evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0.000529, "tokens": [
+                    {"symbol": "TYBG", "contract": TYBG, "balance": 1000.0}]}}},
+                "solana": None}
+        monkeypatch.setattr(oc, "build_extra_contracts",
+                            lambda s, m: {"base": [{"address": TYBG, "symbol": "TYBG"}]})
+        monkeypatch.setattr(oc, "read_wallet_balances", fake_read)
+        engine = self._engine(db)
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda cs: {TYBG.lower(): 0.05})
+        s = engine._onchain_portfolio_summary({})
+        assert captured["extra"] == {"base": [{"address": TYBG, "symbol": "TYBG"}]}
+        tybg = next(r for r in s["holdings"] if r["asset"] == "TYBG")
+        assert tybg["quantity"] == 1000.0 and tybg["contract"] == TYBG
+        assert "contract address" in s["note"]
+
+    def test_executor_resolves_ticker_to_contract(self, db, monkeypatch):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        class _S:
+            def has(self, k): return k == "onchain_private_key"
+            def get(self, k): return "0x" + "11" * 32
+        engine = DecisionEngine(db, c, _FakeMarket(), None, onchain_secrets=_S())
+        TYBG = "0x" + "ab" * 20
+        engine.validator.set_live_holdings(
+            [{"asset": "TYBG", "chain": "base", "quantity": 1.0,
+              "contract": TYBG, "is_gas": False}])
+        import memicoin_core.onchain as oc
+        class _W:
+            def configured(self): return True
+            def gas_ok(self): return True, ""
+        monkeypatch.setattr(oc, "wallet_for", lambda chain, s: _W())
+        action = {"type": "sell", "asset": "TYBG", "amount": 1.0, "reason": "r"}
+        try:
+            err = engine._execute_live("c1", action, "TYBG", 1.0, {})
+        except Exception as e:
+            err = str(e)
+        assert "needs a token contract address" not in err
+
+    def test_validator_accepts_held_discovered_asset(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        v = ConstraintValidator(db, c)
+        TYBG = "0x" + "ab" * 20
+        v.set_live_holdings([{"asset": "TYBG", "chain": "base", "quantity": 1000.0,
+                              "contract": TYBG, "is_gas": False}], total_usd=50.0)
+        r = v.validate_action(
+            {"type": "sell", "asset": TYBG, "amount_or_percent": "50%", "reason": "r"},
+            {}, {})
+        assert r.ok
+        assert v._held_qty("TYBG") == pytest.approx(1000.0)
+
+    def test_percent_sell_resolves_against_live_holdings(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        v = ConstraintValidator(db, c)
+        v.set_live_holdings([{"asset": "TYBG", "chain": "base", "quantity": 1000.0,
+                              "contract": "0x" + "ab" * 20, "is_gas": False}])
+        from memicoin_core.constraints import resolve_action_amount
+        qty = resolve_action_amount(
+            {"type": "sell", "asset": "TYBG", "amount_or_percent": "50%"},
+            {}, v.tracker, db, live_holdings=v.live_holdings)
+        assert qty == pytest.approx(500.0)
+
 
 class TestTokenDiscovery:
     def test_etherscan_v2_parse(self, monkeypatch):
