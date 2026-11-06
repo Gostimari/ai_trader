@@ -49,7 +49,7 @@ function renderWalletPortfolio(w, mode) {
     <div class="card"><div class="k">${label} total</div><div class="v">$${fmt(total)}</div></div>
     <div class="card"><div class="k">Chains</div><div class="v">${Object.keys(w.chains || {}).length}</div></div>
     <div class="card"><div class="k">Assets</div><div class="v">${all.length}</div></div>
-    <div class="card"><div class="k">Mode</div><div class="v">${mode === "demo" ? "DEMO" : "REAL"}</div></div>
+    <div class="card"><div class="k">Mode</div><div class="v">${mode === "demo" ? "DEMO WALLET" : "REAL WALLET"}</div></div>
     ${w.total_pnl_usd != null ? `<div class="card"><div class="k">Bot P&L (vs cost)</div><div class="v ${pnlClass(w.total_pnl_usd)}">$${fmt(w.total_pnl_usd)}</div></div>` : ""}`;
   $("#positions-table tbody").innerHTML = all.sort((a, b) => b.value_usd - a.value_usd).map((r) => `
     <tr><td>${r.symbol}${r.kind === "gas" ? " \u26fd" : ""}</td><td>${r.chain}</td><td>${fmt(r.balance, 6)}</td>
@@ -66,7 +66,7 @@ async function loadState() {
     const s = await api("/api/state");
     _lastState = s;
     const mode = s.mode || "demo";
-    $("#mode-badge").textContent = mode === "demo" ? "DEMO WALLET" : "LIVE TRADING";
+    $("#mode-badge").textContent = mode === "demo" ? "DEMO WALLET" : "REAL WALLET";
     $("#mode-badge").classList.toggle("live", mode === "real");
     renderWalletPortfolio(s.wallet_view, mode);
     $("#btn-resume").classList.toggle("hidden", !(s.emergency_stopped || s.trading_paused));
@@ -429,12 +429,19 @@ async function refreshModeUI() {
     : "REAL MONEY mode: the AI trades your imported wallet's actual funds on-chain. Constraints enforced in code; swaps are irreversible.";
 }
 
+async function refreshAfterModeChange() {
+  await Promise.allSettled([
+    refreshModeUI(), loadState(), loadWalletStatus(),
+    loadDemoWallet(), loadWalletBalances(), checkSetup(),
+  ]);
+}
+
 function modeControls() {
   $("#btn-mode-demo").addEventListener("click", async () => {
     if (!confirm("Switch to WALLET DEMO mode? Trades settle against your demo balances (Settings 3c) — nothing real is moved.")) return;
     try { await api("/api/go-demo", {}); }
     catch (e) { return alert("Failed: " + e.message); }
-    refreshModeUI();
+    refreshAfterModeChange();
   });
   $("#btn-mode-real").addEventListener("click", async () => {
     const st = await api("/api/wallet/status");
@@ -444,7 +451,7 @@ function modeControls() {
     if (!confirm("Final confirmation: real funds will be traded. Continue?")) return;
     try { await api("/api/go-live", { confirm: true }); }
     catch (e) { return alert("Cannot switch: " + e.message); }
-    refreshModeUI();
+    refreshAfterModeChange();
   });
 }
 
@@ -631,7 +638,7 @@ function demoWalletControls() {
   });
   $("#btn-go-demo").addEventListener("click", async () => {
     if (!confirm("Switch to DEMO WALLET mode? The bot will trade your fake wallet with real prices, real gas costs, and all constraints. No blockchain transactions are made.")) return;
-    try { const r = await api("/api/go-demo", {}); alert("Demo wallet mode ON. Trades will settle against your demo balances."); refreshModeUI(); }
+    try { const r = await api("/api/go-demo", {}); alert("Demo wallet mode ON. Trades will settle against your demo balances."); refreshAfterModeChange(); }
     catch (e) { alert("Failed: " + e.message); }
   });
   const fileInput = $("#import-file");

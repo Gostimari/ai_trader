@@ -524,64 +524,86 @@ def read_wallet_balances(secrets: SecretStore, chains: list[str] | None = None,
     from the user's watchlist — arbitrary tokens the user holds are read
     directly on-chain (balanceOf), so no paid indexer is needed.
 
-    Returns {'evm': {'address': .., 'chains': {chain: {'native': x, 'tokens': [...]}}},
+    Returns {'evm': {'address': .., 'chains': {chain: {'native': x, 'tokens': [...]}},
              'solana': {...}, 'error': optional}
     Native symbol is per chain (ETH/MATIC/BNB/USDC-on-Arc/SOL).
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     out: dict = {"evm": None, "solana": None}
+
+    def read_evm_chain(chain: str) -> tuple[str, dict]:
+        w = EVMWallet(secrets, chain)
+        native_sym = EVM_CHAINS[chain].get("native_symbol", "ETH")
+        entry = {"native_symbol": native_sym, "native": 0.0, "tokens": []}
+        try:
+            entry["native"] = w.native_balance()
+        except Exception:
+            pass
+        for sym, addr, decimals in EVM_TOKENS.get(chain, []):
+            try:
+                bal = w.erc20_balance(addr)
+                if bal and bal > 0:
+                    entry["tokens"].append({"symbol": sym, "contract": addr,
+                                            "balance": bal})
+            except Exception:
+                continue
+        # user watchlist contracts: discovered tokens the user wants
+        # tracked (e.g. BRETT on Base, ARCAT/ARGUS on Arc). Balance is
+        # read directly on-chain; zero balances are simply omitted.
+        for extra in (extra_contracts or {}).get(chain, []):
+            if any(t["contract"].lower() == extra["address"].lower()
+                   for t in entry["tokens"]):
+                continue
+            try:
+                bal = w.erc20_balance(extra["address"])
+                if bal and bal > 0:
+                    entry["tokens"].append({"symbol": extra.get("symbol", "?"),
+                                            "contract": extra["address"],
+                                            "balance": bal})
+            except Exception:
+                continue
+        return chain, entry
+
+    def read_solana() -> dict:
+        sw = SolanaWallet(secrets)
+        sol = {"address": sw.address(), "native": 0.0, "tokens": []}
+        try:
+            sol["native"] = sw.native_balance()
+        except Exception:
+            pass
+        return sol
+
+    jobs = []
+    if secrets.has("onchain_private_key"):
+        target = [c for c in (chains or list(EVM_CHAINS)) if c in EVM_CHAINS]
+        jobs += [("evm", c, read_evm_chain, (c,)) for c in target]
+    if secrets.has("onchain_solana_private_key"):
+        jobs.append(("sol", None, read_solana, ()))
+
+    if not jobs:
+        return out
+    evm = None
     if secrets.has("onchain_private_key"):
         evm = {"address": None, "chains": {}}
         try:
             from web3 import Web3
-            acct = Web3().eth.account.from_key(secrets.get("onchain_private_key"))
-            evm["address"] = acct.address
-            target = chains or list(EVM_CHAINS)
-            for chain in target:
-                if chain not in EVM_CHAINS:
-                    continue
-                w = EVMWallet(secrets, chain)
-                native_sym = EVM_CHAINS[chain].get("native_symbol", "ETH")
-                entry = {"native_symbol": native_sym, "native": 0.0, "tokens": []}
-                try:
-                    entry["native"] = w.native_balance()
-                except Exception:
-                    pass
-                for sym, addr, decimals in EVM_TOKENS.get(chain, []):
-                    try:
-                        bal = w.erc20_balance(addr)
-                        if bal and bal > 0:
-                            entry["tokens"].append({"symbol": sym, "contract": addr,
-                                                    "balance": bal})
-                    except Exception:
-                        continue
-                # user watchlist contracts: discovered tokens the user wants
-                # tracked (e.g. BRETT on Base, ARCAT/ARGUS on Arc). Balance is
-                # read directly on-chain; zero balances are simply omitted.
-                for extra in (extra_contracts or {}).get(chain, []):
-                    if any(t["contract"].lower() == extra["address"].lower()
-                           for t in entry["tokens"]):
-                        continue
-                    try:
-                        bal = w.erc20_balance(extra["address"])
-                        if bal and bal > 0:
-                            entry["tokens"].append({"symbol": extra.get("symbol", "?"),
-                                                    "contract": extra["address"],
-                                                    "balance": bal})
-                    except Exception:
-                        continue
-                evm["chains"][chain] = entry
-            out["evm"] = evm
+            evm["address"] = Web3().eth.account.from_key(
+                secrets.get("onchain_private_key")).address
         except Exception as e:
             out["error"] = str(e)
-    if secrets.has("onchain_solana_private_key"):
-        try:
-            sw = SolanaWallet(secrets)
-            sol = {"address": sw.address(), "native": 0.0, "tokens": []}
+    with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as pool:
+        futures = {pool.submit(fn, *args): (kind, key)
+                   for kind, key, fn, args in jobs}
+        for fut in as_completed(futures):
+            kind, key = futures[fut]
             try:
-                sol["native"] = sw.native_balance()
-            except Exception:
-                pass
-            out["solana"] = sol
-        except Exception as e:
-            out["error"] = str(e)
+                if kind == "evm":
+                    chain, entry = fut.result()
+                    evm["chains"][chain] = entry
+                else:
+                    out["solana"] = fut.result()
+            except Exception as e:
+                out["error"] = str(e)
+    out["evm"] = evm
     return out

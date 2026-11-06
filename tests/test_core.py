@@ -29,6 +29,15 @@ def db(tmp_path):
     return d
 
 
+@pytest.fixture(autouse=True)
+def _fresh_wallet_view_cache():
+    import sys
+    srv = sys.modules.get("app.server")
+    if srv is not None:
+        srv._invalidate_view_cache()
+    yield
+
+
 class TestConstraints:
     def test_max_loss_stop_blocks_all_trading(self, db):
         c = Constraints(max_loss_pct=20.0)
@@ -366,6 +375,15 @@ class TestMarketRemovedFromUI:
         controls_idx = js.index("function controls()")
         controls_body = js[controls_idx:js.index("#btn-pause")]
         assert "loadNews" not in controls_body
+
+    def test_mode_tags_and_refresh_after_switch(self):
+        js = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "app.js")).read()
+        assert "DEMO WALLET" in js and "REAL WALLET" in js
+        assert "LIVE TRADING" not in js
+        assert "function refreshAfterModeChange()" in js
+        assert js.count("refreshAfterModeChange()") >= 3
+        html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
+        assert 'PAPER TRADING' not in html
 
     def test_notification_center_wired_and_disclaimer_removed(self):
         html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
@@ -1282,6 +1300,77 @@ class TestWatchlistTokenBalances:
         d = c.get("/api/wallet/balances").json()
         assert d["chains"]["base"][0]["symbol"] == "BRETT"
         assert captured["extra"]["base"][0]["symbol"] == "BRETT"
+
+
+class TestWalletViewCache:
+    def test_state_view_cached_and_invalidated(self, db, monkeypatch):
+        import app.server as srv
+        calls = []
+        monkeypatch.setattr(srv, "_demo_wallet_view",
+                            lambda: (calls.append(1), {"chains": {}, "total_usd": 1.0})[1])
+        srv._invalidate_view_cache()
+        a = srv._cached_wallet_view("demo")
+        b = srv._cached_wallet_view("demo")
+        assert len(calls) == 1 and a is b
+        srv._invalidate_view_cache()
+        srv._cached_wallet_view("demo")
+        assert len(calls) == 2
+        srv._cached_wallet_view("demo", force=True)
+        assert len(calls) == 3
+
+    def test_state_endpoint_serves_cached_view(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        calls = []
+        monkeypatch.setattr(srv, "_demo_wallet_view",
+                            lambda: (calls.append(1), {"chains": {}, "total_usd": 0.0})[1])
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.tracker, "summary", lambda prices: {
+            "cash_usd": 0, "positions": [], "total_value_usd": 0,
+            "total_pnl_usd": 0, "total_pnl_pct": 0, "total_cost_basis_usd": 0,
+            "as_of": None})
+        srv._invalidate_view_cache()
+        c = TestClient(srv.app)
+        c.get("/api/state")
+        c.get("/api/state")
+        assert len(calls) == 1
+
+
+class TestReadWalletBalancesParallel:
+    def test_all_chains_read_and_shape_preserved(self, monkeypatch):
+        import memicoin_core.onchain as oc
+
+        class _FakeW:
+            def __init__(self, secrets, chain):
+                self.chain = chain
+            def native_balance(self):
+                return 1.5
+            def erc20_balance(self, addr):
+                return 0.0
+
+        class _FakeSol:
+            def __init__(self, secrets):
+                pass
+            def address(self):
+                return "sol-addr"
+            def native_balance(self):
+                return 2.0
+
+        class _FakeSecrets:
+            def has(self, k):
+                return k in ("onchain_private_key", "onchain_solana_private_key")
+            def get(self, k):
+                return "0x" + "11" * 32
+
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        monkeypatch.setattr(oc, "SolanaWallet", _FakeSol)
+        out = oc.read_wallet_balances(_FakeSecrets())
+        assert set(out["evm"]["chains"].keys()) == set(oc.EVM_CHAINS.keys())
+        assert out["evm"]["chains"]["base"]["native"] == 1.5
+        assert out["evm"]["address"] and out["evm"]["address"].startswith("0x")
+        assert out["solana"]["native"] == 2.0
+        assert "error" not in out
 
 
 class TestTokenDiscovery:

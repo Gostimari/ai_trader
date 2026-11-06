@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException
@@ -125,8 +126,7 @@ def state():
     mode = ("demo" if constraints.live_execution_mode != "onchain" else "real")
     wallet_view = None
     try:
-        wb = wallet_balances() if mode == "real" else _demo_wallet_view()
-        wallet_view = wb
+        wallet_view = _cached_wallet_view(mode)
     except Exception:
         wallet_view = None
     return {
@@ -140,6 +140,30 @@ def state():
         "paper_trading": constraints.paper_trading,
         "total_pnl_pct": portfolio.get("total_pnl_pct", 0),
     }
+
+
+# Wallet views hit RPCs and price APIs; /api/state polls them every minute
+# and after every UI action, so keep a short-lived snapshot and refresh it
+# only when stale or explicitly invalidated by a mutating endpoint.
+_VIEW_TTL_S = 30.0
+_view_cache: dict = {"key": None, "data": None, "ts": 0.0}
+
+
+def _invalidate_view_cache() -> None:
+    _view_cache["key"] = None
+    _view_cache["data"] = None
+    _view_cache["ts"] = 0.0
+
+
+def _cached_wallet_view(mode: str, force: bool = False) -> dict:
+    now = time.time()
+    c = _view_cache
+    if (not force and c["key"] == mode and c["data"] is not None
+            and now - c["ts"] < _VIEW_TTL_S):
+        return c["data"]
+    data = wallet_balances() if mode == "real" else _demo_wallet_view()
+    c["key"], c["data"], c["ts"] = mode, data, now
+    return data
 
 
 def _demo_wallet_view():
@@ -545,6 +569,7 @@ class GoLiveRequest(BaseModel):
 
 @app.post("/api/go-live")
 def go_live(req: GoLiveRequest):
+    _invalidate_view_cache()
     """Switch to real-money mode. Requires an imported wallet key."""
     if not req.confirm:
         raise HTTPException(400, "Confirmation required")
@@ -571,6 +596,7 @@ class WalletImport(BaseModel):
 
 @app.post("/api/wallet/import")
 def wallet_import(w: WalletImport):
+    _invalidate_view_cache()
     """Import a hot wallet private key. chain='evm' imports ONE key valid for
     all EVM chains (Ethereum, Base, Polygon, BSC, Arc); chain='solana' imports
     a Solana keypair. Keys are stored encrypted and NEVER returned; only the
@@ -637,6 +663,7 @@ def wallet_status():
 
 @app.delete("/api/wallet")
 def wallet_delete():
+    _invalidate_view_cache()
     secrets.delete("onchain_private_key")
     secrets.delete("onchain_solana_private_key")
     db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
@@ -646,6 +673,7 @@ def wallet_delete():
 @app.post("/api/cycle")
 def run_cycle():
     result = make_engine().run_cycle()
+    _invalidate_view_cache()
     return result
 
 
@@ -668,6 +696,7 @@ def emergency_stop():
 
 @app.post("/api/emergency-to-stablecoin")
 def emergency_to_stablecoin():
+    _invalidate_view_cache()
     """Sell everything to USD cash (paper mode) — the safe stablecoin equivalent."""
     c = load_constraints(db)
     c.emergency_stopped = True
@@ -938,6 +967,7 @@ def demo_wallet_rows():
 
 @app.post("/api/demo-wallet")
 def demo_wallet_set(p: DemoRowPayload):
+    _invalidate_view_cache()
     if p.balance < 0:
         raise HTTPException(400, "balance must be >= 0")
     chain = p.chain.strip().lower()
@@ -959,6 +989,7 @@ def demo_wallet_set(p: DemoRowPayload):
 
 @app.delete("/api/demo-wallet")
 def demo_wallet_delete(chain: str, asset: str, contract: str = ""):
+    _invalidate_view_cache()
     db.demo_delete(chain.strip().lower(), asset.strip().upper(), contract.strip())
     db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
     return {"ok": True}
@@ -966,6 +997,7 @@ def demo_wallet_delete(chain: str, asset: str, contract: str = ""):
 
 @app.post("/api/demo-wallet/clear")
 def demo_wallet_clear():
+    _invalidate_view_cache()
     db.demo_clear()
     db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
     return {"ok": True}
@@ -973,6 +1005,7 @@ def demo_wallet_clear():
 
 @app.post("/api/go-demo")
 def go_demo():
+    _invalidate_view_cache()
     """Switch to demo-wallet mode: real prices and full pipeline, simulated
     settlement against the user-built demo wallet."""
     c = load_constraints(db)
