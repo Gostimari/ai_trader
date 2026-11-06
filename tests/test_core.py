@@ -1373,6 +1373,80 @@ class TestReadWalletBalancesParallel:
         assert "error" not in out
 
 
+class TestOnchainPortfolioContext:
+    """Real mode: the AI sees the IMPORTED wallet, not the empty paper book."""
+
+    def _engine(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        class _S:
+            def has(self, k): return k == "onchain_private_key"
+            def get(self, k): return "0x" + "11" * 32
+        return DecisionEngine(db, c, _FakeMarket(), None, onchain_secrets=_S())
+
+    def test_summary_shows_real_wallet_holdings(self, db, monkeypatch):
+        import memicoin_core.onchain as oc
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0.000529, "tokens": []}}},
+            "solana": None})
+        engine = self._engine(db)
+        prices = {}
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda cs: {c.lower(): 3000.0 for c in cs})
+        s = engine._onchain_portfolio_summary(prices)
+        assert s["real_wallet"] is True
+        base_rows = s["chains"]["base"]
+        assert base_rows[0]["asset"] == "ETH" and base_rows[0]["is_gas"] is True
+        assert base_rows[0]["value_usd"] == pytest.approx(0.000529 * 3000.0)
+        assert s["total_value_usd"] == pytest.approx(0.000529 * 3000.0)
+        assert s["holdings"] == [{"asset": "ETH", "chain": "base",
+                                  "quantity": 0.000529}]
+        assert "only SELL or SWAP" in s["note"]
+
+    def test_validator_uses_live_holdings_for_swaps(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        v = ConstraintValidator(db, c)
+        assert v._held_qty("BRETT") == 0.0
+        v.set_live_holdings([{"asset": "ETH", "chain": "base", "quantity": 0.000529}])
+        hint = v._holdings_hint()
+        assert "ETH on base" in hint
+        known = {"BRETT": {"asset": "BRETT", "chain": "base", "contract": "0x123"},
+                 "ETH": {"asset": "ETH", "chain": "base", "contract": ""}}
+        r = v.validate_action(
+            {"type": "swap", "asset": "BRETT", "asset_out": "ETH",
+             "amount_or_percent": "5%", "reason": "r"}, {}, known)
+        assert not r.ok and "do not hold" in r.reason
+
+    def test_engine_cycle_injects_real_holdings(self, db, monkeypatch):
+        import memicoin_core.onchain as oc
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0.000529, "tokens": []}}},
+            "solana": None})
+        engine = self._engine(db)
+        prices = {"DOGE": 0.1, "SHIB": 0.00001, "PEPE": 0.0000005}
+        monkeypatch.setattr(engine.market, "get_prices", lambda force=False: prices)
+        monkeypatch.setattr(engine.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses", lambda cs: {})
+        s = engine._onchain_portfolio_summary(prices)
+        engine.validator.set_live_holdings(s["holdings"])
+        engine.db.demo_mode_percent = False
+        assert engine.validator._held_qty("BRETT") == 0.0
+        assert engine.validator._held_qty("ETH") == pytest.approx(0.000529)
+
+    def test_live_wallet_total_computed_in_real_mode(self, db, monkeypatch):
+        import memicoin_core.onchain as oc
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0.000529, "tokens": []}}},
+            "solana": None})
+        engine = self._engine(db)
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda cs: {c.lower(): 3000.0 for c in cs})
+        total = engine._live_wallet_total({})
+        assert total == pytest.approx(0.000529 * 3000.0)
+
+
 class TestTokenDiscovery:
     def test_etherscan_v2_parse(self, monkeypatch):
         import memicoin_core.discovery as disc

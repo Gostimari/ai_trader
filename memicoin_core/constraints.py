@@ -120,6 +120,9 @@ class ConstraintValidator:
         self.tracker = PortfolioTracker(db)
         self._solana_key = solana_key_present
         self._market = market
+        # live holdings snapshot injected by the engine each onchain cycle,
+        # so sell/swap validation sees the REAL wallet (paper books are empty)
+        self.live_holdings: list[dict] | None = None
 
     def _market_addr_prices(self, contracts):
         if self._market is None:
@@ -206,8 +209,6 @@ class ConstraintValidator:
             if resolved[0] in known_assets and known_assets[resolved[0]].get("contract"):
                 action["_contract"] = known_assets[resolved[0]]["contract"]
             # the swap SELLS the held asset: resolve the amount against holdings
-            if amount is None or amount <= 0:
-                return ValidationResult(False, "Missing or non-positive amount.")
             held = self._held_qty(resolved[0])
             if held <= 0:
                 return ValidationResult(
@@ -215,6 +216,8 @@ class ConstraintValidator:
                     f"Cannot swap {resolved[0]}: you do not hold it "
                     f"(wallet holds: {self._holdings_hint()}). "
                     f"Do not infer holdings from past decisions.")
+            if amount is None or amount <= 0:
+                return ValidationResult(False, "Missing or non-positive amount.")
             return ValidationResult(True, "")
 
         # resolve asset: the AI may reference by symbol OR contract address.
@@ -339,9 +342,17 @@ class ConstraintValidator:
                     False, f"Sell amount exceeds holdings of {asset} ({held:.6g}).")
         return ValidationResult(True, "")
 
+    def set_live_holdings(self, rows: list[dict]) -> None:
+        self.live_holdings = rows
+
     def _held_qty(self, asset: str) -> float:
-        """Total held quantity of an asset in the ACTIVE books: the demo
-        wallet in demo mode, the paper portfolio otherwise."""
+        """Total held quantity of an asset in the ACTIVE books: the imported
+        wallet in onchain mode, the demo wallet in demo mode, the paper
+        portfolio otherwise."""
+        if (self.constraints.live_execution_mode == "onchain"
+                and self.live_holdings is not None):
+            return sum(r["quantity"] for r in self.live_holdings
+                       if r["asset"] == asset and r["quantity"] > 0)
         if getattr(self.db, "demo_mode_percent", False):
             from .demowallet import DemoWallet
             return sum(r["balance"] for r in DemoWallet(self.db).rows()
@@ -350,6 +361,10 @@ class ConstraintValidator:
         return pos["quantity"] if pos else 0.0
 
     def _holdings_hint(self) -> str:
+        if (self.constraints.live_execution_mode == "onchain"
+                and self.live_holdings is not None):
+            return (", ".join(f"{r['quantity']:.6g} {r['asset']} on {r['chain']}"
+                              for r in self.live_holdings) or "nothing")
         if getattr(self.db, "demo_mode_percent", False):
             from .demowallet import DemoWallet
             rows = [r for r in DemoWallet(self.db).rows() if r["balance"] > 0]

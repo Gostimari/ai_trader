@@ -170,6 +170,13 @@ class DecisionEngine:
             if (not self.constraints.paper_trading
                     and self.constraints.live_execution_mode == "demo"):
                 portfolio = self._demo_portfolio_summary(prices)
+            elif (not self.constraints.paper_trading
+                    and self.constraints.live_execution_mode == "onchain"):
+                try:
+                    portfolio = self._onchain_portfolio_summary(prices)
+                    self.validator.set_live_holdings(portfolio["holdings"])
+                except Exception:
+                    pass  # fall back to paper book; validator stays conservative
         except MarketDataError as e:
             self.db.finish_cycle(cycle_id, "failed", "", "", error=f"market data: {e}")
             self.db.add_decision({"cycle_id": cycle_id, "action": "hold",
@@ -386,10 +393,7 @@ class DecisionEngine:
                 total += r["balance"] * p
             return total
         try:
-            from .onchain import read_wallet_balances
-            raw = read_wallet_balances(self._onchain_secrets) if self._onchain_secrets else {}
-            total = (raw or {}).get("total_usd")
-            return float(total) if total is not None else None
+            return self._onchain_portfolio_summary(prices)["total_value_usd"]
         except Exception:
             return None
 
@@ -531,6 +535,95 @@ class DecisionEngine:
                 "note": "Portfolio is the DEMO wallet. Fund buys with USDC "
                         "where available, or with investable gas-token amounts. "
                         "Buys settle against these balances (simulated)."}
+
+    def _onchain_portfolio_summary(self, prices: dict[str, float]) -> dict:
+        """Portfolio state built from the IMPORTED WALLET (real mode) — what
+        the AI must see in onchain mode, so it can only trade assets that
+        actually exist on-chain right now."""
+        from .onchain import read_wallet_balances, EVM_CHAINS
+        from .demowallet import NATIVE_WRAPPED
+        raw = read_wallet_balances(self._onchain_secrets) or {}
+        evm = raw.get("evm") or {}
+        # batch-price every token contract and wrapped native once
+        contracts: list[str] = []
+        for entry in (evm.get("chains") or {}).values():
+            for t in entry.get("tokens", []):
+                if t.get("contract"):
+                    contracts.append(t["contract"])
+        wrapped_needed = []
+        for chain, entry in (evm.get("chains") or {}).items():
+            if entry.get("native") and chain in NATIVE_WRAPPED and chain != "arc":
+                wrapped_needed.append(NATIVE_WRAPPED[chain])
+        contracts += wrapped_needed
+        addr_prices: dict = {}
+        if contracts:
+            try:
+                addr_prices = self.market.get_prices_for_addresses(contracts)
+            except Exception:
+                addr_prices = {}
+
+        def _price(asset, chain, is_gas, contract=""):
+            p = prices.get((asset or "").upper(), 0.0)
+            if p <= 0 and (asset or "").upper() in ("USDC", "USDT"):
+                p = 1.0
+            if p <= 0 and is_gas:
+                if chain == "arc":
+                    p = 1.0
+                else:
+                    w = NATIVE_WRAPPED.get(chain)
+                    if w:
+                        p = addr_prices.get(w.lower(), 0.0)
+            if p <= 0 and contract:
+                p = addr_prices.get(contract.lower(), 0.0)
+            return p
+
+        by_chain: dict = {}
+        total = 0.0
+        for chain, entry in (evm.get("chains") or {}).items():
+            sym = EVM_CHAINS.get(chain, {}).get("native_symbol", "ETH")
+            rows = []
+            if entry.get("native"):
+                q = entry["native"]
+                v = q * _price(sym, chain, True)
+                rows.append({"asset": sym, "chain": chain, "quantity": q,
+                             "is_gas": True, "value_usd": v})
+            for t in entry.get("tokens", []):
+                q = t.get("balance") or 0.0
+                v = q * _price(t.get("symbol"), chain, False, t.get("contract", ""))
+                rows.append({"asset": t.get("symbol") or (t.get("contract") or "?")[:8],
+                             "chain": chain, "quantity": q, "is_gas": False,
+                             "value_usd": v})
+            if rows:
+                by_chain[chain] = rows
+                total += sum(r["value_usd"] for r in rows)
+        sol = raw.get("solana")
+        if sol and sol.get("address"):
+            rows = []
+            if sol.get("native"):
+                q = sol["native"]
+                v = q * _price("SOL", "solana", True)
+                rows.append({"asset": "SOL", "chain": "solana", "quantity": q,
+                             "is_gas": True, "value_usd": v})
+            for t in sol.get("tokens", []):
+                q = t.get("balance") or 0.0
+                v = q * _price(t.get("symbol"), "solana", False, t.get("contract", ""))
+                rows.append({"asset": t.get("symbol") or (t.get("contract") or "?")[:8],
+                             "chain": "solana", "quantity": q, "is_gas": False,
+                             "value_usd": v})
+            if rows:
+                by_chain["solana"] = rows
+                total += sum(r["value_usd"] for r in rows)
+        holdings = [{"asset": r["asset"], "chain": r["chain"], "quantity": r["quantity"]}
+                    for rows in by_chain.values() for r in rows if r["quantity"] > 0]
+        summary = {"real_wallet": True, "chains": by_chain, "holdings": holdings,
+                   "total_value_usd": total,
+                   "note": "Portfolio is the IMPORTED WALLET (real funds). You can "
+                           "only SELL or SWAP assets listed above with a positive "
+                           "quantity. Fund buys with the investable gas-token "
+                           "amounts shown in the Gas reserve section."}
+        if raw.get("error"):
+            summary["warning"] = f"wallet read incomplete: {raw['error']}"
+        return summary
 
     def _build_context(self, prices: dict[str, float], assets: dict[str, dict],
                        portfolio: dict) -> str:
