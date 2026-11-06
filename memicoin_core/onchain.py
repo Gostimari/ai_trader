@@ -34,7 +34,7 @@ EVM_CHAINS = {
         "rpc": "https://mainnet.base.org",
         "rpc_fallbacks": ["https://base-rpc.publicnode.com",
                           "https://base.drpc.org"],
-        "router": "0x4752ba5Dbc36f75D9E232F321687625204392e48",  # Uniswap V2 on Base
+        "router": "0x4752ba5Dbc23f44D87826276BF6Fd6b1C372aD24",  # Uniswap V2 Router02 on Base
         "weth": "0x4200000000000000000000000000000000000006",
         "explorer": "https://basescan.org/tx/",
     },
@@ -42,7 +42,7 @@ EVM_CHAINS = {
         "chain_id": 137,
         "rpc": "https://polygon-bor-rpc.publicnode.com",
         "rpc_fallbacks": ["https://polygon.drpc.org"],
-        "router": "0xA5e0829CAced8fADd424714229311691bfBe27C8",  # QuickSwap (UniV2)
+        "router": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",  # SushiSwap V2 (UniV2 ABI)
         "weth": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
         "explorer": "https://polygonscan.com/tx/",
     },
@@ -348,6 +348,7 @@ class EVMWallet:
                 return TxResult(False, error=(
                     "refusing to swap without a slippage bound: no "
                     "min_amount_out computed from market prices"))
+            self.verify_router(router)
             dec_in = self._erc20_decimals(token_in)
             raw_in = int(amount_in * 10 ** dec_in)
             self.erc20_approve_if_needed(token_in, router, raw_in)
@@ -377,6 +378,34 @@ class EVMWallet:
         except Exception as e:
             log.exception("EVM swap failed on %s", self.chain)
             return TxResult(False, error=str(e))
+
+    def verify_router(self, router: str) -> None:
+        """Fail-closed safety check: refuse to send funds to an address that
+        is not a live Uniswap-V2-style router. A wrong router constant turns
+        every swap into a plain transfer to an address nobody controls - the
+        funds are unrecoverable. Verified on-chain: the router must hold code
+        AND report the configured wrapped-native token via WETH()."""
+        code = self._retry_on_rpc_failure(
+            lambda: self.w3.eth.get_code(self.w3.to_checksum_address(router)))
+        if not code:
+            raise RuntimeError(
+                f"router safety check failed on {self.chain}: {router} holds "
+                f"NO contract code - refusing to send funds to it")
+        weth = self._weth()
+        if weth:
+            abi = [{"constant": True, "inputs": [], "name": "WETH",
+                    "outputs": [{"name": "", "type": "address"}],
+                    "type": "function"}]
+            c = self.w3.eth.contract(address=self.w3.to_checksum_address(router),
+                                     abi=abi)
+            reported = self._retry_on_rpc_failure(lambda: c.functions.WETH().call())
+            if isinstance(reported, (bytes, bytearray)):
+                reported = "0x" + bytes(reported[-20:]).hex()
+            if str(reported).lower() != weth.lower():
+                raise RuntimeError(
+                    f"router safety check failed on {self.chain}: router "
+                    f"{router} reports wrapped-native {reported} but {weth} "
+                    f"is configured - refusing to send funds to it")
 
     def _router(self) -> str | None:
         import os
@@ -418,6 +447,7 @@ class EVMWallet:
                 return TxResult(False, error=(
                     "refusing to swap without a slippage bound: no "
                     "min_amount_out computed from market prices"))
+            self.verify_router(router)
             weth = self._weth()
             if not weth:
                 return TxResult(False, error=f"No wrapped-native token configured for {self.chain}")

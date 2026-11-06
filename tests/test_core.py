@@ -2192,6 +2192,97 @@ class TestGasFeasibility:
                 if addr:
                     Web3.to_checksum_address(addr)
 
+    def test_router_constants_are_verified_live_addresses(self):
+        # regression: the old base router constant 0x4752ba5...392e48 was a
+        # LOOKALIKE of the real Uniswap V2 Router02 with no contract code -
+        # three swaps were sent there as plain transfers and the funds are
+        # unrecoverable. Pin the verified-live addresses exactly.
+        from memicoin_core.onchain import EVM_CHAINS
+        assert EVM_CHAINS["base"]["router"] == \
+            "0x4752ba5Dbc23f44D87826276BF6Fd6b1C372aD24"
+        assert EVM_CHAINS["polygon"]["router"] == \
+            "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"
+        impostor = "0x4752ba5Dbc36f75D9E232F321687625204392e48"
+        for chain, cfg in EVM_CHAINS.items():
+            if cfg.get("router"):
+                assert cfg["router"].lower() != impostor.lower(), chain
+
+    def _stub_wallet(self, chain="base", weth="0x" + "aa" * 20):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = chain
+        w.cfg = {"native_symbol": "ETH", "chain_id": 8453,
+                 "router": "0x" + "bb" * 20, "weth": weth}
+        w._acct = type("A", (), {"address": "0x" + "1" * 40})()
+        return w
+
+    def test_verify_router_fails_closed_on_empty_code(self):
+        w = self._stub_wallet()
+        class _Eth:
+            def get_code(self, addr):
+                return b""
+        w.w3 = type("W3", (), {"eth": _Eth(),
+                               "to_checksum_address": staticmethod(lambda a: a)})()
+        import pytest
+        with pytest.raises(RuntimeError, match="refusing to send funds"):
+            w.verify_router(w.cfg["router"])
+
+    def test_verify_router_passes_when_code_and_weth_match(self):
+        weth = "0x" + "cc" * 20
+        w = self._stub_wallet(weth=weth)
+        class _Contract:
+            class functions:
+                @staticmethod
+                def WETH():
+                    class _Fn:
+                        def call(self):
+                            return bytes(20) + bytes.fromhex(weth[2:])
+                    return _Fn()
+        class _Eth:
+            def get_code(self, addr):
+                return b"\x60\x80"
+            def contract(self, address, abi):
+                return _Contract()
+        w.w3 = type("W3", (), {"eth": _Eth(),
+                               "to_checksum_address": staticmethod(lambda a: a)})()
+        w.verify_router(w.cfg["router"])  # must not raise
+
+    def test_verify_router_rejects_wrong_weth_reported_by_router(self):
+        w = self._stub_wallet(weth="0x" + "cc" * 20)
+        class _Contract:
+            class functions:
+                @staticmethod
+                def WETH():
+                    class _Fn:
+                        def call(self):
+                            return bytes(20) + b"\xee" * 20
+                    return _Fn()
+        class _Eth:
+            def get_code(self, addr):
+                return b"\x60\x80"
+            def contract(self, address, abi):
+                return _Contract()
+        w.w3 = type("W3", (), {"eth": _Eth(),
+                               "to_checksum_address": staticmethod(lambda a: a)})()
+        import pytest
+        with pytest.raises(RuntimeError, match="refusing to send funds"):
+            w.verify_router(w.cfg["router"])
+
+    def test_eth_swap_refuses_funds_when_router_has_no_code(self):
+        # end-to-end guard: a buy through swap_exact_eth_for_tokens must fail
+        # closed (TxResult error, no _send call) when the router holds no code
+        from memicoin_core.onchain import EVMWallet
+        w = self._stub_wallet()
+        class _Eth:
+            def get_code(self, addr):
+                return b""
+        w.w3 = type("W3", (), {"eth": _Eth(),
+                               "to_checksum_address": staticmethod(lambda a: a)})()
+        w.investable_native = lambda: 1.0
+        res = w.swap_exact_eth_for_tokens("0x" + "dd" * 20, 0.5, min_amount_out=1.0)
+        assert not res.ok
+        assert "router safety check" in res.error
+
     def test_send_extracts_raw_from_signed_transaction_dataclass(self):
         # regression: eth_account >= 0.13 returns a SignedTransaction
         # dataclass; _send used dict access and every swap died at signing
@@ -3465,15 +3556,24 @@ class TestSlippageBound:
         w._acct = None
         captured = {}
 
+        weth = "0x" + "5" * 40
+
+        class _Fn:
+            def call(self):
+                return weth
+
         class _C:
             def encode_abi(self, name, args):
                 captured["name"] = name
                 captured["args"] = args
                 return b"0xdata"
+            class functions:
+                WETH = staticmethod(lambda: _Fn())
 
         class _Eth:
             contract = MagicMock(return_value=_C())
             gas_price = 20 * 10 ** 9
+            get_code = MagicMock(return_value=b"\x60\x80")
             def get_transaction_count(self, a):
                 return 0
         class _W3:
