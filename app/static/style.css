@@ -63,3 +63,10 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 .gas-warning.critical { background: #4a1f24; color: #ff9aa5; }
 .gas-warning.low { background: #3a2c14; color: #f0c674; }
 .gas-warning .chain-line { margin: 2px 0; }
+
+.news-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.news-item .hint { margin: 2px 0 0 0; font-size: .75rem; }
+.news-item a { color: var(--accent); text-decoration: none; }
+.news-item a:hover { text-decoration: underline; }
+
+.button-link { display: inline-block; background: var(--accent); color: #111; padding: 8px 16px; border-radius: 8px; text-decoration: none; font-weight: 600; }

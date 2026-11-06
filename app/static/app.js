@@ -69,6 +69,8 @@ async function loadState() {
     const badges = [];
     if (s.trading_paused) badges.push("\u23f8 PAUSED");
     if (s.emergency_stopped) badges.push("\ud83d\uded1 EMERGENCY STOP");
+    if (s.constraints?.onchain_testnet && s.mode === "real")
+      badges.push("\ud83e\uddea TESTNET \u2014 faucet funds only");
     $("#status-badges").innerHTML = badges.map((b) => `<span class="badge live">${b}</span>`).join("");
     $("#btn-resume").classList.toggle("hidden", !(s.emergency_stopped || s.trading_paused));
     fillSettings(s.constraints);
@@ -84,6 +86,7 @@ function fillSettings(c) {
   $("#min_trade_usd").value = c.min_trade_usd ?? 1;
   $("#onchain_slippage_pct").value = c.onchain_slippage_pct ?? 5;
   $("#onchain_testnet").checked = !!c.onchain_testnet;
+  $("#onchain_chain").value = c.onchain_chain || "ethereum";
   $("#allowed_chains").value = (c.allowed_chains || []).join(", ");
   $("#decision_time_utc").value = c.decision_time_utc;
   $("#custom_prompt").value = c.custom_prompt || "";
@@ -122,7 +125,8 @@ function controls() {
           ? `\n\u26d4 REJECTED by your constraints (${r.rejected.length}):\n` + r.rejected.map((a) => "  \u2022 " + fmtAction(a)).join("\n")
           : "") +
         (r.executed?.length || r.rejected?.length ? "" : "\nNo actions proposed (hold).");
-      await Promise.all([loadState(), loadDecisions()]);
+      await Promise.all([loadState(), loadDecisions(), loadNews()]);
+  setInterval(loadNews, 600000);
     } catch (e) { $("#cycle-result").textContent = "Failed: " + e.message; }
     $("#btn-cycle").disabled = false;
   });
@@ -167,6 +171,7 @@ function controls() {
       min_trade_usd: Number($("#min_trade_usd").value),
       onchain_slippage_pct: Number($("#onchain_slippage_pct").value),
       onchain_testnet: $("#onchain_testnet").checked,
+      onchain_chain: $("#onchain_chain").value,
       allowed_chains: $("#allowed_chains").value.split(",").map((s) => s.trim()).filter(Boolean),
       decision_time_utc: $("#decision_time_utc").value || "00:00",
       custom_prompt: $("#custom_prompt").value,
@@ -536,6 +541,29 @@ function demoWalletControls() {
     try { const r = await api("/api/go-demo", {}); alert("Demo wallet mode ON. Trades will settle against your demo balances."); refreshModeUI(); }
     catch (e) { alert("Failed: " + e.message); }
   });
+}
+
+async function loadNews() {
+  const el = $("#news-list");
+  if (!el) return;
+  try {
+    const r = await api("/api/news");
+    if (!r.news?.length) {
+      el.innerHTML = r.error
+        ? `News unavailable right now (${r.error}).`
+        : "No news items found.";
+      return;
+    }
+    el.className = "";
+    el.innerHTML = r.news.map((n) => `
+      <div class="news-item">
+        <a href="${n.link}" target="_blank" rel="noopener"><b>${n.title}</b></a>
+        <span class="hint">${n.source}${n.published ? " \u00b7 " + n.published.slice(5, 16) : ""}</span>
+        ${n.summary ? `<div class="hint">${n.summary}</div>` : ""}
+      </div>`).join("");
+  } catch (e) {
+    el.innerHTML = `News unavailable: ${e.message}`;
+  }
 }
 
 async function loadWatchlist() {

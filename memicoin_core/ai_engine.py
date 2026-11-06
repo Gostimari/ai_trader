@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from typing import Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -21,6 +22,10 @@ from .settings import Constraints
 log = logging.getLogger("memicoin.engine")
 
 MAX_ACTIONS_PER_CYCLE = 6
+
+# One cycle at a time app-wide: a scheduled cycle and a manual "Run now"
+# must never execute concurrently against the same balances.
+_cycle_lock = threading.Lock()
 
 
 class AIAction(BaseModel):
@@ -121,13 +126,12 @@ Rules:
 
 class DecisionEngine:
     def __init__(self, db: Database, constraints: Constraints,
-                 market: MarketDataModule, news=None, live_executor=None,
+                 market: MarketDataModule, news=None,
                  onchain_secrets=None):
         self.db = db
         self.constraints = constraints
         self.market = market
         self.news = news  # unused; retained for API compatibility
-        self.live_executor = live_executor
         self._onchain_secrets = onchain_secrets
         self.tracker = PortfolioTracker(db)
         solana_present = False
@@ -142,6 +146,15 @@ class DecisionEngine:
 
     # ---------- cycle ----------
     def run_cycle(self) -> dict:
+        if not _cycle_lock.acquire(blocking=False):
+            return {"status": "skipped",
+                    "error": "another decision cycle is already running"}
+        try:
+            return self._run_cycle_locked()
+        finally:
+            _cycle_lock.release()
+
+    def _run_cycle_locked(self) -> dict:
         cycle_id = self.db.start_cycle()
         # mode flag FIRST: stop checks and amount resolution must both be
         # demo-aware from the very beginning of the cycle
@@ -169,7 +182,11 @@ class DecisionEngine:
             self.db.finish_cycle(cycle_id, "failed", "", "", error="market data failure during stop-loss sweep")
             return {"cycle_id": cycle_id, "status": "failed", "error": "stop-loss sweep: market data"}
 
-        stop = self.validator.check_stop_conditions(prices)
+        live_total = None
+        if not self.constraints.paper_trading:
+            live_total = self._live_wallet_total(prices)
+            self._ensure_pnl_baseline(live_total)
+        stop = self.validator.check_stop_conditions(prices, live_total_usd=live_total)
         if not stop.ok:
             self.db.finish_cycle(cycle_id, "blocked", "", "", error=stop.reason)
             self.db.add_decision({"cycle_id": cycle_id, "action": "hold",
@@ -338,6 +355,55 @@ class DecisionEngine:
             "executed": executed, "rejected": rejected, "failed": failed,
         }
 
+
+    def _live_wallet_total(self, prices: dict[str, float]) -> float | None:
+        """USD value of the wallet the bot actually trades (demo wallet or
+        the imported on-chain wallet). None when it cannot be determined."""
+        if self.constraints.live_execution_mode == "demo":
+            from .demowallet import DemoWallet, NATIVE_WRAPPED
+            demo = DemoWallet(self.db)
+            wrapped_needed = [NATIVE_WRAPPED[r["chain"]] for r in demo.rows()
+                              if r["is_gas"] and r["chain"] in NATIVE_WRAPPED
+                              and r["chain"] != "arc"]
+            wrapped_prices: dict = {}
+            if wrapped_needed:
+                try:
+                    wrapped_prices = self.market.get_prices_for_addresses(wrapped_needed)
+                except Exception:
+                    wrapped_prices = {}
+            total = 0.0
+            for r in demo.rows():
+                p = prices.get(r["asset"].upper(), 0.0)
+                if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
+                    p = 1.0
+                if p <= 0 and r["is_gas"]:
+                    if r["chain"] == "arc":
+                        p = 1.0
+                    else:
+                        w = NATIVE_WRAPPED.get(r["chain"])
+                        if w:
+                            p = wrapped_prices.get(w.lower(), 0.0)
+                total += r["balance"] * p
+            return total
+        try:
+            from .onchain import read_wallet_balances
+            raw = read_wallet_balances(self._onchain_secrets) if self._onchain_secrets else {}
+            total = (raw or {}).get("total_usd")
+            return float(total) if total is not None else None
+        except Exception:
+            return None
+
+    def _ensure_pnl_baseline(self, live_total: float | None) -> None:
+        """Snapshot the wallet value the first time a cycle runs after the
+        wallet changed (mode switch, edit, clear). This baseline is what the
+        profit-target / max-loss stops compare against in demo and on-chain
+        modes - the paper books are meaningless there. Reset by the wallet
+        endpoints; empty/zero here re-snapshots on the next funded cycle."""
+        if live_total is None or live_total <= 0:
+            return
+        baseline = self.db.get_setting("pnl_baseline_usd")
+        if not baseline or float(baseline) <= 0:
+            self.db.set_setting("pnl_baseline_usd", float(live_total))
 
     def _apply_per_position_stops(self, cycle_id: str, prices: dict[str, float],
                                   assets: dict[str, dict]) -> list | None:
@@ -856,43 +922,6 @@ class DecisionEngine:
             "tx_id": f"demo-{chain}-{asset[:10]}",
         })
         return None
-        if self.live_executor is None or not self.live_executor.configured():
-            return "live mode selected but exchange API keys are not configured"
-        order_action = {**action, "amount": amount}
-        if action["type"] == "swap":
-            # execute as sell + buy on the pair(s)
-            dest = action.get("asset_out", "")
-            sell_res = self.live_executor.sell(cycle_id, order_action)
-            if not sell_res.ok:
-                return sell_res.error
-            self.db.add_decision({
-                "cycle_id": cycle_id, "action": "sell", "asset_in": asset, "asset_out": "USDC",
-                "amount": sell_res.amount, "value_usd": sell_res.value_usd,
-                "status": "executed", "reason": f"Swap leg 1/2: {action['reason']}",
-                "tx_id": sell_res.tx_id,
-            })
-            buy_action = {**order_action, "type": "buy", "asset": dest,
-                          "amount": sell_res.value_usd / max(self._live_price(dest), 1e-12)}
-            buy_res = self.live_executor.buy(cycle_id, buy_action)
-            if not buy_res.ok:
-                return f"swap sell leg ok ({sell_res.tx_id}) but buy leg failed: {buy_res.error}"
-            self.db.add_decision({
-                "cycle_id": cycle_id, "action": "buy", "asset_in": dest, "asset_out": "USDC",
-                "amount": buy_res.amount, "value_usd": buy_res.value_usd,
-                "status": "executed", "reason": f"Swap leg 2/2: {action['reason']}",
-                "tx_id": buy_res.tx_id,
-            })
-            return None
-        res = (self.live_executor.buy(cycle_id, order_action) if action["type"] == "buy"
-               else self.live_executor.sell(cycle_id, order_action))
-        if not res.ok:
-            return res.error
-        self.db.add_decision({
-            "cycle_id": cycle_id, "action": action["type"], "asset_in": asset, "asset_out": "USDC",
-            "amount": res.amount, "value_usd": res.value_usd, "status": "executed",
-            "reason": action["reason"], "tx_id": res.tx_id,
-        })
-        return None
 
     def _execute_onchain(self, cycle_id: str, action: dict, asset: str, amount: float,
                          prices: dict[str, float] | None = None) -> str | None:
@@ -1037,18 +1066,6 @@ class DecisionEngine:
     @staticmethod
     def _native_mint(chain: str) -> str:
         return "So11111111111111111111111111111111111111112" if chain == "solana" else ""
-
-    def _live_price(self, asset: str) -> float:
-        try:
-            snap = self.db.latest_market_snapshot()
-            if snap:
-                import json as _json
-                for a in _json.loads(snap["payload"]):
-                    if a["asset"] == asset.upper():
-                        return a.get("price_usd", 0.0)
-        except Exception:
-            pass
-        return 0.0
 
     def _chain_of(self, asset: str) -> str | None:
         snap = self.db.latest_market_snapshot()

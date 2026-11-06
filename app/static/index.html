@@ -43,6 +43,9 @@
       <button id="btn-resume" class="hidden">Re-enable trading</button>
     </div>
     <div id="cycle-result"></div>
+
+    <h3 style="margin-top:28px">📰 Crypto news</h3>
+    <div id="news-list" class="hint">Loading…</div>
   </section>
 
   <section id="decisions" class="panel">
@@ -93,6 +96,15 @@
         <input type="number" id="min_trade_usd" step="0.5" min="0" value="1"></label>
       <label>Max slippage on on-chain swaps % (swap reverts if the price moves more than this)
         <input type="number" id="onchain_slippage_pct" step="0.5" min="0" max="50" value="5"></label>
+      <label>Default on-chain chain (Mode B home chain for swaps)
+        <select id="onchain_chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="base" selected>Base</option>
+          <option value="polygon">Polygon</option>
+          <option value="binance-smart-chain">BSC</option>
+          <option value="arc">Arc</option>
+          <option value="solana">Solana</option>
+        </select></label>
       <label><input type="checkbox" id="onchain_testnet"> Testnet mode (verify on Sepolia / Base Sepolia first — faucet tokens only, no real funds)</label>
       <label>Risk appetite (influences how the AI writes its plan)
         <select id="risk_profile">
@@ -177,6 +189,8 @@
           <option value="binance-smart-chain">BSC</option>
           <option value="arc">Arc</option>
           <option value="solana">Solana</option>
+          <option value="sepolia">Sepolia (testnet)</option>
+          <option value="base-sepolia">Base Sepolia (testnet)</option>
         </select></label>
       <label>Token symbol (e.g. ETH for gas, USDC, BRETT)
         <input type="text" id="demo-asset" placeholder="USDC"></label>
@@ -210,6 +224,13 @@
       <div id="watchlist-status" class="hint"></div>
       <button type="submit">Save watchlist</button>
     </form>
+
+    <h3 style="margin-top:28px">5 · Data</h3>
+    <p class="hint">Download a full JSON backup of your local state (settings, positions,
+      decisions, cycles, demo wallet). Wallet keys are NOT exported — they stay encrypted.</p>
+    <div class="controls">
+      <a id="btn-export" class="button-link" href="/api/export" download="memicoin-backup.json">⬇ Export data (JSON)</a>
+    </div>
   </section>
 
   <section id="wallet" class="panel">

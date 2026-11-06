@@ -378,7 +378,7 @@ class TestSecretStore:
 
     def test_engine_live_requires_configured_executor(self, db, monkeypatch):
         c = Constraints(paper_trading=False, live_execution_mode="onchain")
-        engine = DecisionEngine(db, c, _FakeMarket(), live_executor=None)
+        engine = DecisionEngine(db, c, _FakeMarket())
         ai_out = json.dumps({
             "analysis_summary": "buy",
             "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 10, "reason": "r"}],
@@ -434,81 +434,6 @@ class TestLiveModeGate:
         assert r.status_code == 200
         cc = load_constraints(db)
         assert cc.live_execution_mode == "demo"
-
-
-class TestLiveExecutor:
-    def _make_executor(self, fake_ex):
-        from memicoin_core.executor import LiveExecutor
-        ex = LiveExecutor.__new__(LiveExecutor)
-        ex.secrets = None
-        ex._exchange = fake_ex
-        return ex
-
-    def test_client_order_id_deterministic_and_unique(self):
-        from memicoin_core.executor import LiveExecutor
-        a = {"type": "buy", "asset": "DOGE", "amount_or_percent": 10}
-        id1 = LiveExecutor._client_order_id("c1", a)
-        assert id1 == LiveExecutor._client_order_id("c1", a)  # idempotent
-        assert id1 != LiveExecutor._client_order_id("c2", a)  # unique per cycle
-
-    def test_sell_reconciles_balances(self):
-        ex = self._make_executor(_FakeCCXT(base=500, quote=1000, price=0.5))
-        res = ex.sell("c1", {"type": "sell", "asset": "DOGE", "amount": 200})
-        assert res.ok, res.error
-        assert res.amount == pytest.approx(200)
-        assert res.value_usd == pytest.approx(100.0)
-
-    def test_sell_reconciliation_failure_detected(self):
-        ex = self._make_executor(_FakeCCXT(base=500, quote=1000, price=0.5, steal=True))
-        res = ex.sell("c1", {"type": "sell", "asset": "DOGE", "amount": 200})
-        assert not res.ok
-        assert "reconciliation failed" in res.error
-
-    def test_buy_rejects_insufficient_balance(self):
-        ex = self._make_executor(_FakeCCXT(base=0, quote=10, price=100.0))
-        res = ex.buy("c1", {"type": "buy", "asset": "DOGE", "amount": 1})
-        assert not res.ok and "insufficient" in res.error
-
-    def test_sell_clamps_to_available_balance(self):
-        ex = self._make_executor(_FakeCCXT(base=50, quote=1000, price=2.0))
-        res = ex.sell("c1", {"type": "sell", "asset": "DOGE", "amount": 99999})
-        assert res.ok
-        assert res.amount == pytest.approx(50)
-
-
-class _FakeCCXT:
-    """Minimal CCXT-like exchange double. No network."""
-    def __init__(self, base, quote, price, steal=False):
-        self.bal = {"DOGE": {"free": base}, "USDC": {"free": quote}}
-        self.price = price
-        self.steal = steal
-        self.orders = []
-
-    def fetch_balance(self):
-        return self.bal
-
-    def fetch_ticker(self, symbol):
-        return {"last": self.price}
-
-    def create_order(self, symbol, otype, side, amount, params=None):
-        self.orders.append((symbol, otype, side, amount, params))
-        if side == "buy":
-            filled_quote = amount
-            avg = self.price
-            self.bal["USDC"]["free"] -= filled_quote
-            got = filled_quote / avg
-            if self.steal:
-                got *= 0.5
-            self.bal["DOGE"]["free"] += got
-            return {"id": "o1", "filled": filled_quote, "average": avg, "status": "closed"}
-        filled = amount
-        avg = self.price
-        self.bal["DOGE"]["free"] -= filled
-        got = filled * avg
-        if self.steal:
-            got *= 0.5
-        self.bal["USDC"]["free"] += got
-        return {"id": "o1", "filled": filled, "average": avg, "status": "closed"}
 
 
 class TestOnchainWallet:
@@ -3201,3 +3126,254 @@ class TestSolanaKeyImport:
         assert r.status_code == 200, r.json()
         assert r.json()["chain"] == "solana"
         assert r.json()["address"] == str(kp.pubkey())
+
+
+class TestPnlBaselineStops:
+    def test_baseline_loss_stop_blocks_in_demo(self, db):
+        """Regression: in demo mode the max-loss/profit stops could never
+        trigger (pnl was hardcoded 0). They now compare the live wallet
+        value against the pnl_baseline_usd snapshot."""
+        c = Constraints(paper_trading=False, live_execution_mode="demo",
+                        max_loss_pct=20.0)
+        db.set_setting("pnl_baseline_usd", 100.0)
+        db.demo_mode_percent = True
+        v = ConstraintValidator(db, c)
+        r = v.check_stop_conditions({}, live_total_usd=70.0)
+        assert not r.ok and "Max loss" in r.reason
+
+    def test_baseline_profit_target_stops_in_demo(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="demo",
+                        profit_target_pct=50.0)
+        db.set_setting("pnl_baseline_usd", 100.0)
+        db.demo_mode_percent = True
+        v = ConstraintValidator(db, c)
+        r = v.check_stop_conditions({}, live_total_usd=160.0)
+        assert not r.ok and "Profit target" in r.reason
+
+    def test_no_baseline_yet_means_no_stop(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="demo",
+                        max_loss_pct=20.0)
+        db.demo_mode_percent = True
+        v = ConstraintValidator(db, c)
+        assert v.check_stop_conditions({}, live_total_usd=10.0).ok
+
+    def test_engine_snapshots_demo_baseline_on_first_cycle(self, db, monkeypatch):
+        db.demo_set("arc", "USDC", 100.0, "")
+        c = Constraints(paper_trading=False, live_execution_mode="demo")
+        engine = DecisionEngine(db, c, _FakeMarket())
+        ai_out = json.dumps({"analysis_summary": "calm", "actions": [],
+                             "confidence": "low"})
+        monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
+        result = engine.run_cycle()
+        assert result["status"] == "completed"
+        assert float(db.get_setting("pnl_baseline_usd")) == 100.0
+
+    def test_engine_reset_baseline_on_mode_switch(self, db, monkeypatch):
+        db.set_setting("pnl_baseline_usd", 42.0)
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        assert c.post("/api/go-demo", json={}).status_code == 200
+        assert db.get_setting("pnl_baseline_usd") == ""
+
+    def test_demo_wallet_edit_resets_baseline(self, db, monkeypatch):
+        db.set_setting("pnl_baseline_usd", 42.0)
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        assert c.post("/api/demo-wallet",
+                      json={"chain": "arc", "asset": "USDC", "balance": 10}).status_code == 200
+        assert db.get_setting("pnl_baseline_usd") == ""
+
+
+class TestSwapHoldingsValidation:
+    def test_swap_unheld_asset_rejected_cleanly(self, db):
+        """Regression: swap actions skipped the holdings check that sells
+        have, failing late at execution instead of at validation."""
+        c = Constraints()
+        v = ConstraintValidator(db, c)
+        action = {"type": "swap", "asset": "DOGE", "asset_out": "SHIB",
+                  "amount_or_percent": "100%", "amount": 5.0}
+        r = v.validate_action(action, PRICES, ASSETS)
+        assert not r.ok
+        assert "do not hold" in r.reason
+
+    def test_swap_held_asset_passes(self, db):
+        db.upsert_position("DOGE", "binance-smart-chain", 100, 10)
+        c = Constraints()
+        v = ConstraintValidator(db, c)
+        action = {"type": "swap", "asset": "DOGE", "asset_out": "SHIB",
+                  "amount_or_percent": "100%", "amount": 50.0}
+        assert v.validate_action(action, PRICES, ASSETS).ok
+
+
+class TestCycleOverlapLock:
+    def test_second_concurrent_cycle_is_skipped(self, db):
+        import memicoin_core.ai_engine as ae
+        engine = DecisionEngine(db, Constraints(), _FakeMarket())
+        with ae._cycle_lock:
+            result = engine.run_cycle()
+        assert result["status"] == "skipped"
+        assert "already running" in result["error"]
+
+
+class TestSchedulerRetry:
+    def _sched(self, db):
+        from memicoin_core.scheduler import DailyScheduler
+        return DailyScheduler(db, lambda: None)
+
+    def test_due_first_time_of_day(self, db):
+        from datetime import datetime, timezone
+        s = self._sched(db)
+        now = datetime.now(timezone.utc)
+        assert s._due(now, True, "2099-01-01") is True
+
+    def test_not_due_before_target_time(self, db):
+        from datetime import datetime, timezone
+        s = self._sched(db)
+        now = datetime.now(timezone.utc)
+        assert s._due(now, False, "2099-01-01") is False
+
+    def test_retry_after_cooldown_only(self, db):
+        import time as _t
+        from datetime import datetime, timezone
+        s = self._sched(db)
+        today = datetime.now(timezone.utc).date().isoformat()
+        db.set_setting("last_auto_cycle_date", today)
+        db.set_setting("last_auto_cycle_failed_at", str(_t.time() - 60))
+        assert s._due(datetime.now(timezone.utc), True, today) is False
+        db.set_setting("last_auto_cycle_failed_at", str(_t.time() - 1801))
+        assert s._due(datetime.now(timezone.utc), True, today) is True
+
+    def test_failed_cycle_not_marked_done(self, db):
+        from datetime import datetime, timezone
+        class _FailEngine:
+            def run_cycle(self):
+                return {"status": "failed", "error": "AI unreachable"}
+        from memicoin_core.scheduler import DailyScheduler
+        s = DailyScheduler(db, lambda: _FailEngine())
+        s._tick()
+        today = datetime.now(timezone.utc).date().isoformat()
+        assert db.get_setting("last_auto_cycle_date") != today
+        assert float(db.get_setting("last_auto_cycle_failed_at")) > 0
+
+    def test_successful_cycle_marks_done_and_clears_failure(self, db, monkeypatch):
+        from datetime import datetime, timezone
+        class _OkEngine:
+            def run_cycle(self):
+                return {"status": "completed"}
+        from memicoin_core.scheduler import DailyScheduler
+        s = DailyScheduler(db, lambda: _OkEngine())
+        s._tick()
+        today = datetime.now(timezone.utc).date().isoformat()
+        assert db.get_setting("last_auto_cycle_date") == today
+        assert db.get_setting("last_auto_cycle_failed_at") == ""
+
+    def test_skipped_cycle_neither_done_nor_failed(self, db):
+        class _SkippedEngine:
+            def run_cycle(self):
+                return {"status": "skipped", "error": "busy"}
+        from memicoin_core.scheduler import DailyScheduler
+        s = DailyScheduler(db, lambda: _SkippedEngine())
+        s._tick()
+        assert db.get_setting("last_auto_cycle_date") is None
+        assert not db.get_setting("last_auto_cycle_failed_at")
+
+
+class TestNewsModule:
+    def _rss(self):
+        return (b"<rss><channel>"
+                b"<item><title>Bull run</title><link>http://x/1</link>"
+                b"<pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>"
+                b"<description>&lt;p&gt;markets rally&lt;/p&gt;</description></item>"
+                b"<item><title>No date item</title><link>http://x/2</link>"
+                b"<description>plain</description></item>"
+                b"</channel></rss>")
+
+    def test_parses_feed_items(self, monkeypatch):
+        import memicoin_core.news as news_mod
+        class FakeResp:
+            content = self._rss()
+            def raise_for_status(self): pass
+        monkeypatch.setattr(news_mod.requests, "get",
+                            lambda *a, **k: FakeResp())
+        n = news_mod.NewsModule()
+        items = n.get_news()
+        # 3 feeds x 2 items; dated items sort first
+        assert len(items) == 6
+        assert items[0]["title"] == "Bull run"
+        assert items[0]["summary"] == "markets rally"
+        assert items[0]["source"] == "CoinDesk"
+        assert items[0]["published_ts"] > 0
+
+    def test_all_feeds_down_reports_error(self, monkeypatch):
+        import requests as requests_lib
+        import memicoin_core.news as news_mod
+        def boom(*a, **k):
+            raise requests_lib.RequestException("network down")
+        monkeypatch.setattr(news_mod.requests, "get", boom)
+        n = news_mod.NewsModule()
+        assert n.get_news() == []
+        assert "network down" in n.last_error
+
+    def test_endpoint_returns_news(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv.news, "get_news", lambda limit=30: [
+            {"title": "T", "link": "http://x", "source": "S",
+             "published": "", "published_ts": 0, "summary": ""}])
+        c = TestClient(srv.app)
+        r = c.get("/api/news")
+        assert r.status_code == 200
+        assert r.json()["news"][0]["title"] == "T"
+
+
+class TestExportEndpoint:
+    def test_export_contains_state_without_secrets(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        db.upsert_position("DOGE", "binance-smart-chain", 10, 1.0)
+        db.demo_set("arc", "USDC", 25.0, "")
+        c = TestClient(srv.app)
+        r = c.get("/api/export")
+        assert r.status_code == 200
+        body = r.json()
+        for key in ("settings", "positions", "decisions", "cycles", "demo_wallet"):
+            assert key in body
+        assert any(p["asset"] == "DOGE" for p in body["positions"])
+        assert any(r_["asset"] == "USDC" for r_ in body["demo_wallet"])
+        text = r.text
+        assert "private_key" not in text
+
+
+class TestOnchainChainSetting:
+    def test_settings_can_set_valid_onchain_chain(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/constraints", json={"onchain_chain": "base"})
+        assert r.status_code == 200
+        assert load_constraints(db).onchain_chain == "base"
+
+    def test_settings_reject_unknown_onchain_chain(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        c = TestClient(srv.app)
+        r = c.post("/api/constraints", json={"onchain_chain": "moonchain"})
+        assert r.status_code == 400
+
+    def test_go_live_accepts_onchain_chain(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has", lambda k: True)
+        c = TestClient(srv.app)
+        r = c.post("/api/go-live", json={"confirm": True, "onchain_chain": "base"})
+        assert r.status_code == 200
+        cc = load_constraints(db)
+        assert cc.live_execution_mode == "onchain" and cc.onchain_chain == "base"

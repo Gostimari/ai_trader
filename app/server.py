@@ -15,6 +15,7 @@ load_dotenv()
 from memicoin_core.ai_engine import DecisionEngine
 from memicoin_core.db import Database
 from memicoin_core.market import MarketDataError, MarketDataModule
+from memicoin_core.news import NewsModule
 from memicoin_core.portfolio import PortfolioTracker
 from memicoin_core.scheduler import DailyScheduler
 from memicoin_core.secrets import SecretStore
@@ -29,6 +30,7 @@ if db.get_cash() == 0.0 and not db.get_positions() and not db.list_decisions(1):
     db.set_cash(_constraints0.starting_capital_usd)
 market = MarketDataModule(db)
 tracker = PortfolioTracker(db)
+news = NewsModule()
 
 
 secrets = SecretStore()
@@ -49,6 +51,28 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 @app.get("/")
 def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
+
+
+@app.get("/api/news")
+def get_news():
+    items = news.get_news()
+    return {"news": items, "error": news.last_error or None,
+            "cached": bool(news._cache) and news._cache is items}
+
+
+@app.get("/api/export")
+def export_data():
+    """Full JSON backup of the app's local state (no secrets: keys stay in
+    the encrypted store and are never exported)."""
+    from memicoin_core.db import utcnow
+    return {
+        "exported_at": utcnow(),
+        "settings": {k: db.get_setting(k) for k in db.list_settings()},
+        "positions": db.get_positions(),
+        "decisions": db.list_decisions(limit=10000),
+        "cycles": db.list_cycles(),
+        "demo_wallet": db.demo_rows(),
+    }
 
 
 @app.get("/api/state")
@@ -455,16 +479,24 @@ def cycles():
 # Fields that decide WHERE the bot trades and what it baseline-compares
 # against. They change only through their dedicated endpoints (/api/go-live,
 # /api/go-demo, /api/pause, /api/emergency-*), never through a settings save.
-MODE_CONTROL_KEYS = {"paper_trading", "live_execution_mode", "onchain_chain",
+MODE_CONTROL_KEYS = {"paper_trading", "live_execution_mode",
                      "starting_capital_usd", "settings_version",
                      "trading_paused", "emergency_stopped"}
+
+
+def _supported_onchain_chains() -> set[str]:
+    from memicoin_core.onchain import EVM_CHAINS
+    return set(EVM_CHAINS) | {"solana"}
 
 
 @app.post("/api/constraints")
 def set_constraints(c: Constraints):
     current = load_constraints(db)
     data = current.to_json()
-    for k, v in c.model_dump(exclude_unset=True).items():
+    provided = c.model_dump(exclude_unset=True)
+    if "onchain_chain" in provided and provided["onchain_chain"] not in _supported_onchain_chains():
+        raise HTTPException(400, f"onchain_chain must be one of {sorted(_supported_onchain_chains())}")
+    for k, v in provided.items():
         if k not in MODE_CONTROL_KEYS:
             data[k] = v
     db.set_setting("constraints", Constraints(**data).to_json())
@@ -473,6 +505,7 @@ def set_constraints(c: Constraints):
 
 class GoLiveRequest(BaseModel):
     confirm: bool
+    onchain_chain: str | None = None
 
 
 @app.post("/api/go-live")
@@ -482,10 +515,15 @@ def go_live(req: GoLiveRequest):
         raise HTTPException(400, "Confirmation required")
     if not (secrets.has("onchain_private_key") or secrets.has("onchain_solana_private_key")):
         raise HTTPException(400, "No wallet imported — import a key in Settings first")
+    if req.onchain_chain and req.onchain_chain not in _supported_onchain_chains():
+        raise HTTPException(400, f"onchain_chain must be one of {sorted(_supported_onchain_chains())}")
     c = load_constraints(db)
     c.paper_trading = False
     c.live_execution_mode = "onchain"
+    if req.onchain_chain:
+        c.onchain_chain = req.onchain_chain
     db.set_setting("constraints", c.to_json())
+    db.set_setting("pnl_baseline_usd", "")  # re-snapshot at the first real cycle
     return {"ok": True, "mode": "real"}
 
 
@@ -566,6 +604,7 @@ def wallet_status():
 def wallet_delete():
     secrets.delete("onchain_private_key")
     secrets.delete("onchain_solana_private_key")
+    db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
     return {"ok": True}
 
 
@@ -875,6 +914,7 @@ def demo_wallet_set(p: DemoRowPayload):
                                        "quantity instead, or try again in a moment.")
         balance = p.balance / price
     db.demo_set(chain, asset, balance, p.contract.strip(), p.is_gas)
+    db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
     return {"ok": True, "stored_balance": balance,
             "price_used": (p.balance / balance) if balance else 0}
 
@@ -882,12 +922,14 @@ def demo_wallet_set(p: DemoRowPayload):
 @app.delete("/api/demo-wallet")
 def demo_wallet_delete(chain: str, asset: str, contract: str = ""):
     db.demo_delete(chain.strip().lower(), asset.strip().upper(), contract.strip())
+    db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
     return {"ok": True}
 
 
 @app.post("/api/demo-wallet/clear")
 def demo_wallet_clear():
     db.demo_clear()
+    db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
     return {"ok": True}
 
 
@@ -899,4 +941,5 @@ def go_demo():
     c.paper_trading = False
     c.live_execution_mode = "demo"
     db.set_setting("constraints", c.to_json())
+    db.set_setting("pnl_baseline_usd", "")  # re-snapshot at the first demo cycle
     return {"ok": True, "mode": "demo"}

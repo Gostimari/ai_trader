@@ -126,27 +126,28 @@ class ConstraintValidator:
             return {}
         return self._market.get_prices_for_addresses(contracts)
 
-    def check_stop_conditions(self, prices: dict[str, float]) -> ValidationResult:
+    def check_stop_conditions(self, prices: dict[str, float],
+                              live_total_usd: float | None = None) -> ValidationResult:
         c = self.constraints
         if c.emergency_stopped:
             return ValidationResult(False, "Emergency stop is active; all trading halted.")
         if c.trading_paused:
             return ValidationResult(False, "Trading is paused by the user.")
-        # mode-aware valuation: paper books for paper mode; the live/demo
-        # wallet value otherwise (the paper books are irrelevant there)
-        if getattr(self.db, "demo_mode_percent", False):
-            # demo mode: total = demo wallet value; start = today's first-seen
-            # value is unknown, so drawdown vs cost basis is not measurable the
-            # same way - the per-position stop and manual stops still apply.
-            from .demowallet import DemoWallet
-            demo = DemoWallet(self.db)
-            total = 0.0
-            for r in demo.rows():
-                p = prices.get(r["asset"].upper(), 0.0)
-                if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
-                    p = 1.0
-                total += r["balance"] * p
-            pnl_pct = 0.0  # no external cost basis for demo funds
+        # mode-aware valuation: paper books for paper mode; the wallet the bot
+        # actually trades otherwise, compared against the pnl_baseline_usd
+        # snapshot (taken at the first cycle after the wallet last changed).
+        if not c.paper_trading and live_total_usd is not None and live_total_usd > 0:
+            baseline = self.db.get_setting("pnl_baseline_usd")
+            try:
+                baseline = float(baseline) if baseline else 0.0
+            except (TypeError, ValueError):
+                baseline = 0.0
+            pnl_pct = ((live_total_usd - baseline) / baseline * 100) if baseline > 0 else 0.0
+        elif getattr(self.db, "demo_mode_percent", False):
+            # engine passed no wallet total (direct validator use in tests):
+            # value the demo wallet, but without a baseline the daily
+            # profit/loss stops cannot measure drawdown.
+            pnl_pct = 0.0
         else:
             summary = self.tracker.summary(prices)
             start = c.starting_capital_usd
@@ -207,6 +208,13 @@ class ConstraintValidator:
             # the swap SELLS the held asset: resolve the amount against holdings
             if amount is None or amount <= 0:
                 return ValidationResult(False, "Missing or non-positive amount.")
+            held = self._held_qty(resolved[0])
+            if held <= 0:
+                return ValidationResult(
+                    False,
+                    f"Cannot swap {resolved[0]}: you do not hold it "
+                    f"(wallet holds: {self._holdings_hint()}). "
+                    f"Do not infer holdings from past decisions.")
             return ValidationResult(True, "")
 
         # resolve asset: the AI may reference by symbol OR contract address.

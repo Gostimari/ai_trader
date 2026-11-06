@@ -119,6 +119,11 @@ class Database:
         row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value"]) if row else default
 
+    def list_settings(self) -> list[str]:
+        with _lock:
+            rows = self.conn.execute("SELECT key FROM settings").fetchall()
+        return [r["key"] for r in rows]
+
     def set_setting(self, key: str, value: Any) -> None:
         with _lock:
             self.conn.execute(
