@@ -23,7 +23,8 @@ log = logging.getLogger("memicoin.onchain")
 EVM_CHAINS = {
     "ethereum": {
         "chain_id": 1,
-        "rpc": "https://eth.llamarpc.com",
+        "rpc": "https://ethereum-rpc.publicnode.com",
+        "rpc_fallbacks": ["https://eth.drpc.org"],
         "router": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",  # Uniswap V2
         "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         "explorer": "https://etherscan.io/tx/",
@@ -31,13 +32,16 @@ EVM_CHAINS = {
     "base": {
         "chain_id": 8453,
         "rpc": "https://mainnet.base.org",
+        "rpc_fallbacks": ["https://base-rpc.publicnode.com",
+                          "https://base.drpc.org"],
         "router": "0x4752ba5DBc36f75D9e232F321687625204392e48",  # Uniswap V2 on Base
         "weth": "0x4200000000000000000000000000000000000006",
         "explorer": "https://basescan.org/tx/",
     },
     "polygon": {
         "chain_id": 137,
-        "rpc": "https://polygon-rpc.com",
+        "rpc": "https://polygon-bor-rpc.publicnode.com",
+        "rpc_fallbacks": ["https://polygon.drpc.org"],
         "router": "0xa5E0829CaCEd8fAdd424714229311691BfBe27c8",  # QuickSwap (UniV2)
         "weth": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
         "explorer": "https://polygonscan.com/tx/",
@@ -45,6 +49,7 @@ EVM_CHAINS = {
     "binance-smart-chain": {
         "chain_id": 56,
         "rpc": "https://bsc-dataseed.binance.org",
+        "rpc_fallbacks": ["https://bsc-rpc.publicnode.com"],
         "router": "0x10ED43C718714eb63d5aA57B78B54704E256024E",  # PancakeSwap V2
         "weth": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "explorer": "https://bscscan.com/tx/",
@@ -78,6 +83,7 @@ EVM_CHAINS = {
     "base-sepolia": {
         "chain_id": 84532,
         "rpc": "https://sepolia.base.org",
+        "rpc_fallbacks": ["https://base-sepolia-rpc.publicnode.com"],
         "router": None,
         "weth": "0x4200000000000000000000000000000000000006",
         "explorer": "https://sepolia.basescan.org/tx/",
@@ -111,10 +117,43 @@ class EVMWallet:
         self.chain = chain
         self.cfg = EVM_CHAINS[chain]
         import os
-        rpc = os.environ.get(f"MEMICOIN_RPC_{chain.upper().replace('-', '_')}", self.cfg["rpc"])
-        from web3 import Web3
-        self.w3 = Web3(Web3.HTTPProvider(rpc))
+        env = os.environ.get(f"MEMICOIN_RPC_{chain.upper().replace('-', '_')}")
+        self._rpcs = ([env] if env
+                      else [self.cfg["rpc"]] + list(self.cfg.get("rpc_fallbacks", [])))
+        self._rpc_idx = 0
         self._acct = None
+        self._connect()
+
+    def _connect(self) -> None:
+        from web3 import Web3
+        self.w3 = Web3(Web3.HTTPProvider(self._rpcs[self._rpc_idx]))
+
+    def _retry_on_rpc_failure(self, fn):
+        """Run an idempotent RPC read; on a connection-level failure rotate
+        to the next endpoint for this chain and retry. Public endpoints go
+        down often, so one dead endpoint must never freeze the wallet.
+        Non-connection errors (reverts, bad addresses) raise immediately."""
+        rpcs = getattr(self, "_rpcs", None)
+        if not rpcs:  # wallet built without the endpoint list: single shot
+            return fn()
+        last: Exception | None = None
+        for _ in range(len(self._rpcs)):
+            try:
+                return fn()
+            except Exception as e:
+                msg = str(e).lower()
+                transient = any(k in msg for k in (
+                    "connection", "resolve", "resolution", "timeout",
+                    "timed out", "max retries", "unreachable", "429",
+                    "rate limit"))
+                if not transient:
+                    raise
+                last = e
+                self._rpc_idx = (self._rpc_idx + 1) % len(rpcs)
+                self._connect()
+                log.warning("RPC failed on %s, failing over to %s: %s",
+                            self.chain, rpcs[self._rpc_idx], e)
+        raise last  # type: ignore[misc]
 
     def _account(self):
         if self._acct is None:
@@ -134,7 +173,8 @@ class EVMWallet:
 
     # ---------- reads ----------
     def native_balance(self) -> float:
-        bal = self.w3.eth.get_balance(self.address())
+        bal = self._retry_on_rpc_failure(
+            lambda: self.w3.eth.get_balance(self.address()))
         return float(self.w3.from_wei(bal, "ether"))
 
     def erc20_balance(self, token: str) -> float:
@@ -143,7 +183,8 @@ class EVMWallet:
                 "type": "function"}]
         contract = self.w3.eth.contract(
             address=self.w3.to_checksum_address(token), abi=abi)
-        raw = contract.functions.balanceOf(self.address()).call()
+        raw = self._retry_on_rpc_failure(
+            lambda: contract.functions.balanceOf(self.address()).call())
         decimals = self._erc20_decimals(token)
         return float(raw) / (10 ** decimals)
 
@@ -152,7 +193,8 @@ class EVMWallet:
                 "outputs": [{"name": "", "type": "uint8"}], "type": "function"}]
         contract = self.w3.eth.contract(
             address=self.w3.to_checksum_address(token), abi=abi)
-        return int(contract.functions.decimals().call())
+        return int(self._retry_on_rpc_failure(
+            lambda: contract.functions.decimals().call()))
 
     # ---------- gas feasibility ----------
     def gas_balance(self) -> float:
@@ -164,7 +206,7 @@ class EVMWallet:
         Uses a typical DEX-swap gas limit; conservative (over-estimates)."""
         typical_swap_gas = 250_000  # conservative router swap incl. approval
         try:
-            price = self.w3.eth.gas_price
+            price = self._retry_on_rpc_failure(lambda: self.w3.eth.gas_price)
         except Exception:
             price = 30 * 10 ** 9  # 30 gwei fallback
         return float(self.w3.from_wei(typical_swap_gas * price, "ether"))
@@ -219,15 +261,18 @@ class EVMWallet:
         signed = self._account().sign_transaction(tx)
         raw = signed.get("raw_transaction") or signed.get("rawTransaction")
         h = self.w3.eth.send_raw_transaction(raw)
-        receipt = self.w3.eth.wait_for_transaction_receipt(h, timeout=180)
+        receipt = self._retry_on_rpc_failure(
+            lambda: self.w3.eth.wait_for_transaction_receipt(h, timeout=180))
         if receipt["status"] != 1:
             raise RuntimeError(f"transaction reverted: {h.hex()}")
         return h.hex()
 
     def _base_tx(self, to: str, data: bytes, value_wei: int = 0) -> dict:
         addr = self.address()
-        nonce = self.w3.eth.get_transaction_count(addr)
-        gas = self.w3.eth.estimate_gas({"from": addr, "to": to, "data": data, "value": value_wei})
+        nonce = self._retry_on_rpc_failure(
+            lambda: self.w3.eth.get_transaction_count(addr))
+        gas = self._retry_on_rpc_failure(lambda: self.w3.eth.estimate_gas(
+            {"from": addr, "to": to, "data": data, "value": value_wei}))
         return {
             "from": addr,
             "to": self.w3.to_checksum_address(to),
@@ -236,7 +281,7 @@ class EVMWallet:
             "nonce": nonce,
             "chainId": self.cfg["chain_id"],
             "gas": int(gas * 1.3),
-            "gasPrice": self.w3.eth.gas_price,
+            "gasPrice": self._retry_on_rpc_failure(lambda: self.w3.eth.gas_price),
         }
 
     def erc20_approve_if_needed(self, token: str, router: str, amount_raw: int) -> None:
@@ -250,7 +295,8 @@ class EVMWallet:
                 "name": "approve", "outputs": [{"name": "", "type": "bool"}],
                 "type": "function"}]
         token_c = self.w3.eth.contract(address=self.w3.to_checksum_address(token), abi=abi)
-        current = token_c.functions.allowance(self.address(), router).call()
+        current = self._retry_on_rpc_failure(
+            lambda: token_c.functions.allowance(self.address(), router).call())
         if current < amount_raw:
             data = token_c.encode_abi("approve", args=[router, 2 ** 256 - 1])
             self._send(self._base_tx(token, data))
@@ -273,7 +319,9 @@ class EVMWallet:
         path = [self.w3.to_checksum_address(token_in),
                 self.w3.to_checksum_address(token_out)]
         c = self.w3.eth.contract(address=self.w3.to_checksum_address(router), abi=abi)
-        amounts = c.functions.getAmountsOut(int(amount_in * 10 ** dec_in), path).call()
+        amounts = self._retry_on_rpc_failure(
+            lambda: c.functions.getAmountsOut(
+                int(amount_in * 10 ** dec_in), path).call())
         dec_out = self._erc20_decimals(token_out)
         expected = amounts[-1] / 10 ** dec_out
         return expected * (1.0 - slippage_pct / 100.0)

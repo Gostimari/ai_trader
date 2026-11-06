@@ -674,7 +674,10 @@ class DecisionEngine:
             "## Wallet capabilities\n"
             f"- Solana key imported: {solana_key} "
             f"({'Solana assets allowed' if solana_key == 'yes' else 'do NOT propose Solana assets'})\n"
-            f"- CCTP-bridgeable USDC chains: {', '.join(bridgeable)} (bridge action available)"
+            f"- CCTP-bridgeable USDC chains: {', '.join(bridgeable)} (bridge action available)\n"
+            "- Swaps settle on the TOKEN'S own chain (it must be in allowed "
+            "chains): fund a buy with the investable gas-token funds of the "
+            "token's chain, shown in the Gas reserve section"
             + ("" if c.onchain_testnet else
                "\n- Testnet mode is OFF: never propose sepolia/base-sepolia bridges or assets"))
         # gas reserves: what's investable per chain (real mode only)
@@ -1081,7 +1084,10 @@ class DecisionEngine:
         look them up from the market snapshot's chain data."""
         from .onchain import EVM_CHAINS, wallet_for
         prices = prices or {}
-        chain = self.constraints.onchain_chain
+        # swaps settle on the TOKEN'S chain (annotated at validation, where
+        # the buy was sized against that chain's investable funds);
+        # onchain_chain is only the fallback for un-annotated actions
+        chain = action.get("_chain") or self.constraints.onchain_chain
         # network gate: swaps must run on the network matching the toggle
         # (sepolia/base-sepolia only in testnet mode; mainnet chains only
         # with testnet OFF - no solana devnet support exists)
@@ -1253,7 +1259,7 @@ class DecisionEngine:
         try:
             if getattr(self.constraints, "auto_market_expansion", True):
                 best = self.market.search_contract(
-                    symbol, self.constraints.onchain_chain)
+                    symbol, action.get("_chain") or self.constraints.onchain_chain)
                 if best:
                     addr = (best.get("baseToken") or {}).get("address") or ""
                     if addr:

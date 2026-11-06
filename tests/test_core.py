@@ -2102,6 +2102,102 @@ class TestGasFeasibility:
         assert "RuntimeError" in err
 
 
+    def test_execute_onchain_uses_token_chain_not_onchain_chain(self, db, monkeypatch):
+        import memicoin_core.onchain as oc
+        c = Constraints(paper_trading=False, live_execution_mode="onchain",
+                        onchain_chain="ethereum")
+        class _Store:
+            def has(self, k): return k == "onchain_private_key"
+            def get(self, k): return "0x" + "1" * 64
+        engine = DecisionEngine(db, c, _FakeMarket(), None,
+                                onchain_secrets=_Store())
+        seen = []
+        class _W:
+            def configured(self): return True
+            def gas_ok(self, buffer=1.5): return False, "no gas"
+        def _wf(chain, secrets):
+            seen.append(chain)
+            return _W()
+        monkeypatch.setattr(oc, "wallet_for", _wf)
+        err = engine._execute_onchain(
+            "cycle-x",
+            {"type": "buy", "asset": "0x" + "2" * 40, "amount": 1,
+             "reason": "r", "_chain": "base"}, "0x" + "2" * 40, 1.0)
+        assert seen == ["base"]
+        assert err is not None and "gas check failed on base" in err
+
+    def test_cross_chain_swap_rejected_at_validation(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain",
+                        onchain_chain="base")
+        v = ConstraintValidator(db, c)
+        v.set_live_holdings(
+            [{"asset": "BRETT", "chain": "base", "quantity": 100.0,
+              "is_gas": False, "contract": "0x" + "aa" * 20}], total_usd=10.0)
+        known = {"BRETT": {"asset": "BRETT", "chain": "base",
+                           "contract": "0x" + "aa" * 20},
+                 "USDC": {"asset": "USDC", "chain": "ethereum",
+                          "contract": "0x" + "bb" * 20}}
+        r = v.validate_action(
+            {"type": "swap", "asset": "BRETT", "asset_out": "USDC",
+             "amount_or_percent": "50%", "reason": "r"}, {}, known)
+        assert not r.ok
+        assert "not a DEX swap" in r.reason
+
+    def test_zero_investable_hint_lists_gas_chains(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain",
+                        onchain_chain="base", min_trade_usd=1.0)
+        v = ConstraintValidator(db, c)
+        v.set_live_holdings(
+            [{"asset": "ETH", "chain": "base", "quantity": 0.002,
+              "is_gas": True}], total_usd=6.0)
+        known = {"PEPE": {"asset": "PEPE", "chain": "polygon",
+                          "contract": "0x" + "cc" * 20}}
+        r = v.validate_action(
+            {"type": "buy", "asset": "PEPE", "amount_or_percent": 200000,
+             "reason": "r"}, {"PEPE": 0.00001}, known)
+        assert not r.ok
+        assert "Wallet holds gas on" in r.reason
+        assert "base" in r.reason
+
+    def test_rpc_failover_rotates_to_next_endpoint(self):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "base"
+        w.cfg = {"native_symbol": "ETH", "chain_id": 8453}
+        w._acct = type("A", (), {"address": "0x" + "1" * 40})()
+        calls = []
+        class _Eth:
+            def get_balance(self, addr):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise RuntimeError("Max retries exceeded with url: /")
+                return 10 ** 18
+        w.w3 = type("W3", (), {"eth": _Eth(),
+                               "from_wei": staticmethod(lambda v, u: v / 1e18)})()
+        w._rpcs = ["https://down.example", "https://up.example"]
+        w._rpc_idx = 0
+        w._connect = lambda: None
+        assert w.native_balance() == 1.0
+        assert w._rpc_idx == 1
+
+    def test_rpc_failover_ignores_non_connection_errors(self):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "base"
+        w.cfg = {"native_symbol": "ETH", "chain_id": 8453}
+        w._acct = type("A", (), {"address": "0x" + "1" * 40})()
+        class _Eth:
+            def get_balance(self, addr):
+                raise ValueError("execution reverted")
+        w.w3 = type("W3", (), {"eth": _Eth(),
+                               "from_wei": staticmethod(lambda v, u: v / 1e18)})()
+        w._rpcs = ["https://a", "https://b"]
+        w._rpc_idx = 0
+        with pytest.raises(ValueError):
+            w.native_balance()
+        assert w._rpc_idx == 0
+
+
 class TestCycleEndpointCrash:
     def test_crashed_cycle_returns_failed_not_500(self, db, monkeypatch):
         import app.server as srv
@@ -4072,13 +4168,38 @@ class TestFreshTokenExpansion:
                 return "FRESH"
 
         c = Constraints(paper_trading=False, live_execution_mode="onchain",
-                        onchain_chain="base")
+                        onchain_chain="base", allowed_chains=["base"])
         v = ConstraintValidator(db, c, market=_M())
         r = v.validate_action(
             {"type": "buy", "asset": "FRESH", "amount_or_percent": "5.0", "reason": "r"},
             {}, {})
         assert not r.ok
-        assert "trades on ethereum" in r.reason
+        assert "not in your allowed chains" in r.reason
+
+    def test_fresh_token_on_other_allowed_chain_accepted(self, db):
+        # multi-chain execution: a fresh token on a DIFFERENT allowed chain
+        # is tradable there (sized against that chain's funds), not rejected
+        FRESH = "0x" + "ce" * 20
+        pair = {"chainId": "ethereum", "baseToken": {"symbol": "FRESH2", "address": FRESH},
+                "priceUsd": "0.25", "liquidity": {"usd": 50000.0},
+                "volume": {"h24": 20000.0}}
+
+        class _M:
+            def search_contract(self, symbol, chain=None):
+                return pair
+            def note_asset(self, p):
+                return "FRESH2"
+
+        c = Constraints(paper_trading=False, live_execution_mode="onchain",
+                        onchain_chain="base",
+                        allowed_chains=["base", "ethereum"])
+        v = ConstraintValidator(db, c, market=_M())
+        action = {"type": "buy", "asset": "FRESH2",
+                  "amount_or_percent": "5.0", "reason": "r"}
+        r = v.validate_action(action, {}, {})
+        assert r.ok, r.reason
+        assert action["_chain"] == "ethereum"
+        assert action["_contract"] == FRESH
 
     def test_search_contract_prefers_requested_chain(self, db, monkeypatch):
         m = self._module(db)

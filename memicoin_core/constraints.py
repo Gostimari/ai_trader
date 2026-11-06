@@ -203,9 +203,7 @@ class ConstraintValidator:
             # brand-new coins are tradable without the user adding
             # contracts; the best pair supplies contract, chain and price
             try:
-                pair = self._market.search_contract(
-                    asset, self.constraints.onchain_chain
-                    if self.constraints.live_execution_mode == "onchain" else None)
+                pair = self._market.search_contract(asset, None)
             except Exception:
                 pair = None
             if pair:
@@ -215,12 +213,15 @@ class ConstraintValidator:
                 chain = DS_CHAIN_ALIAS.get(dsc.lower(), dsc)
                 sym = (base.get("symbol") or asset).upper()
                 contract = base.get("address") or ""
-                if (self.constraints.live_execution_mode == "onchain"
-                        and chain != self.constraints.onchain_chain):
-                    return ValidationResult(
-                        False,
-                        f"{sym} trades on {chain}; on-chain swaps run on "
-                        f"{self.constraints.onchain_chain} only.")
+                if self.constraints.live_execution_mode == "onchain":
+                    allowed = [a.lower() for a in self.constraints.allowed_chains]
+                    if (self.constraints.autonomy_mode == "constrained"
+                            and chain and chain.lower() not in allowed):
+                        return ValidationResult(
+                            False,
+                            f"{sym} trades on {chain}, which is not in your "
+                            f"allowed chains ({', '.join(allowed)}).")
+                action["_chain"] = chain
                 info = {"asset": sym, "chain": chain, "contract": contract}
                 if sym != asset:
                     asset = sym
@@ -261,6 +262,25 @@ class ConstraintValidator:
                 else:
                     resolved.append(match)
             action["asset"], action["_swap_dest"] = resolved[0], resolved[1]
+            # a DEX swap settles on ONE chain: refuse token->token proposals
+            # whose endpoints live on different chains (bridge moves USDC
+            # across chains instead)
+            src_chain = ((known_assets.get(resolved[0]) or {}).get("chain")
+                         or action.get("_chain") or "")
+            dst_info = known_assets.get(resolved[1]) or {}
+            dst_chain = dst_info.get("chain") or ""
+            from .onchain import EVM_CHAINS as _EVM
+            src_native = "SOL" if src_chain == "solana" else (
+                _EVM.get(src_chain, {}).get("native_symbol") or "ETH").upper()
+            if (self.constraints.live_execution_mode == "onchain"
+                    and src_chain and dst_chain and src_chain != dst_chain
+                    and resolved[1].upper() != src_native):
+                return ValidationResult(
+                    False,
+                    f"Cross-chain swap {resolved[0]} ({src_chain}) to "
+                    f"{resolved[1]} ({dst_chain}) is not a DEX swap; propose "
+                    f"a bridge action, or swap to the {src_native} of "
+                    f"{src_chain}.")
             if resolved[1] in known_assets and known_assets[resolved[1]].get("contract"):
                 action["_swap_dest_contract"] = known_assets[resolved[1]]["contract"]
             if resolved[0] in known_assets and known_assets[resolved[0]].get("contract"):
@@ -292,6 +312,8 @@ class ConstraintValidator:
                     break
         elif info.get("contract"):
             action["_contract"] = info["contract"]
+        if info and info.get("chain"):
+            action["_chain"] = info["chain"]
         r = self._validate_asset(asset, known_assets, info)
         if not r.ok:
             return r
@@ -334,11 +356,19 @@ class ConstraintValidator:
                     and self.live_holdings is not None):
                 investable = self._live_investable_usd(asset, known_assets)
                 if investable < c.min_trade_usd:
+                    tok_chain = (known_assets.get(asset) or {}).get("chain", "")
+                    others = sorted({r.get("chain") for r in self.live_holdings
+                                     if r.get("is_gas") and r.get("chain")
+                                     and r.get("chain") != tok_chain})
+                    hint = (f" Wallet holds gas on {', '.join(others)}: only "
+                            f"tokens on those chains can be bought with the "
+                            f"funds there." if others else "")
                     return ValidationResult(
                         False,
-                        f"Only ${investable:.2f} is investable on the token's "
-                        f"chain after the gas reserve (below the "
-                        f"${c.min_trade_usd:.2f} minimum trade).")
+                        f"Only ${investable:.2f} is investable on "
+                        f"{tok_chain or 'the token\'s chain'} after the gas "
+                        f"reserve (below the ${c.min_trade_usd:.2f} minimum "
+                        f"trade).{hint}")
                 if cost > investable + 1e-9:
                     cost = investable
                     action["amount"] = investable / price
