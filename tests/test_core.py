@@ -114,6 +114,27 @@ class TestConstraints:
         assert r.ok  # clamped even in full_control: technical limits apply
         assert action["amount"] == pytest.approx(250.0)
 
+    def test_buy_amount_is_usd_not_coin_quantity(self, db):
+        c = Constraints()
+        v = ConstraintValidator(db, c)
+        # 10 must mean $10, not 10 SHIB (which would be $0.0001 of dust)
+        r = v.validate_action({"type": "buy", "asset": "SHIB", "amount_or_percent": 10}, PRICES, ASSETS)
+        assert r.ok, r.reason
+
+    def test_buy_percent_of_portfolio(self, db):
+        c = Constraints(max_position_pct=25.0)
+        v = ConstraintValidator(db, c)
+        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": "20%"}, PRICES, ASSETS)
+        assert r.ok  # 20% of $100 = $20 <= $25 max position
+        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": "30%"}, PRICES, ASSETS)
+        assert r.ok  # clamped to the 25% room, not rejected
+
+    def test_dust_buy_rejected(self, db):
+        c = Constraints(min_trade_usd=1.0)
+        v = ConstraintValidator(db, c)
+        r = v.validate_action({"type": "buy", "asset": "PEPE", "amount_or_percent": 0.5}, PRICES, ASSETS)
+        assert not r.ok and "minimum trade size" in r.reason
+
 
 class TestPortfolio:
     def test_pnl_math(self, db):
@@ -222,7 +243,7 @@ class TestEngineCycle:
         engine = DecisionEngine(db, c, _FakeMarket())
         ai_out = json.dumps({
             "analysis_summary": "DOGE momentum looks strong.",
-            "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 200, "reason": "strong 24h momentum"}],
+            "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 20, "reason": "strong 24h momentum"}],
             "confidence": "high",
         })
         monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
@@ -292,6 +313,7 @@ class TestSettings:
         # app-facing defaults after migration
         assert c.live_execution_mode == "demo"
         assert c.autonomy_mode == "constrained"
+        assert c.min_trade_usd == 1.0
         c.custom_prompt = "be careful"
         db.set_setting("constraints", c.to_json())
         c2 = load_constraints(db)

@@ -81,6 +81,7 @@ function fillSettings(c) {
     $("#per_position_stop_pct").value = c.per_position_stop_pct ?? "";
   $("#risk_profile").value = c.risk_profile;
   $("#max_position_pct").value = c.max_position_pct;
+  $("#min_trade_usd").value = c.min_trade_usd ?? 1;
   $("#allowed_chains").value = (c.allowed_chains || []).join(", ");
   $("#decision_time_utc").value = c.decision_time_utc;
   $("#custom_prompt").value = c.custom_prompt || "";
@@ -161,6 +162,7 @@ function controls() {
       per_position_stop_pct: $("#per_position_stop_pct").value === "" ? null : Number($("#per_position_stop_pct").value),
       risk_profile: $("#risk_profile").value,
       max_position_pct: Number($("#max_position_pct").value),
+      min_trade_usd: Number($("#min_trade_usd").value),
       allowed_chains: $("#allowed_chains").value.split(",").map((s) => s.trim()).filter(Boolean),
       decision_time_utc: $("#decision_time_utc").value || "00:00",
       custom_prompt: $("#custom_prompt").value,

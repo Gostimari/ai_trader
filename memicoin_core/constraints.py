@@ -28,7 +28,14 @@ def resolve_action_amount(action: dict, prices: dict[str, float],
         return float(raw)
     a = action.get("amount_or_percent")
     if isinstance(a, (int, float)):
-        return float(a) if a > 0 else None
+        val = float(a)
+        if val <= 0:
+            return None
+        # same contract as strings: numeric buys are USD, not coin quantities
+        if action.get("type") == "buy":
+            price = action.get("_price") or prices.get(action.get("asset", ""), 0.0)
+            return val / price if price > 0 else None
+        return val
     if not isinstance(a, str) or not a.strip():
         return None
     s = a.strip()
@@ -41,10 +48,16 @@ def resolve_action_amount(action: dict, prices: dict[str, float],
         return None
     if val <= 0:
         return None
+    asset = action.get("asset", "")
     if not is_pct:
+        # Amount contract: for BUYS a plain number is a USD budget (e.g. 25
+        # = spend $25), because AI-proposed coin quantities on sub-cent meme
+        # coins resolve to dust. For sells/swaps it stays a coin quantity.
+        if action.get("type") == "buy":
+            price = action.get("_price") or prices.get(asset, 0.0)
+            return val / price if price > 0 else None
         return val
     pct = val / 100.0
-    asset = action.get("asset", "")
     if action.get("type") == "buy":
         # resolve against the funds that will actually pay:
         # paper mode -> paper portfolio; demo mode -> demo wallet spendables
@@ -230,6 +243,12 @@ class ConstraintValidator:
             if price is None or price <= 0:
                 return ValidationResult(False, f"No reliable price for {asset}; refusing to buy.")
             cost = amount * price
+            if cost < c.min_trade_usd:
+                return ValidationResult(
+                    False,
+                    f"Buy of ${cost:.2f} is below the minimum trade size "
+                    f"${c.min_trade_usd:.2f} (dust guard). Buys are sized in USD.",
+                )
             # portfolio total: paper books in paper mode; demo wallet otherwise
             if getattr(self.db, "demo_mode_percent", False):
                 from .demowallet import DemoWallet, NATIVE_WRAPPED

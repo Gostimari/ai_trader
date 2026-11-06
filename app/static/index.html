@@ -89,6 +89,8 @@
         <input type="number" id="profit_target_pct" step="0.1" min="0" placeholder="e.g. 50"></label>
       <label>Max position size (% of portfolio in one asset)
         <input type="number" id="max_position_pct" step="0.1" min="0.1" max="100" value="25"></label>
+      <label>Minimum trade size in USD (dust guard — smaller buys are rejected)
+        <input type="number" id="min_trade_usd" step="0.5" min="0" value="1"></label>
       <label>Risk appetite (influences how the AI writes its plan)
         <select id="risk_profile">
           <option value="safe">Safe — prioritize capital preservation</option>

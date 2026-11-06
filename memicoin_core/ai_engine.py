@@ -68,7 +68,8 @@ You MUST respond with ONLY a JSON object, no markdown, matching exactly this sch
 }
 Rules:
 - Use tickers exactly as they appear in the market data provided.
-- amount_or_percent: prefer an absolute quantity of the asset; you may use "N%" meaning N% of current portfolio value for buys, or N% of current holdings for sells.
+- amount_or_percent: BUY sizing is in USD — a plain number is the USD amount to spend (e.g. 25 means "spend $25"), or use "N%" for N% of total portfolio value (e.g. "10%" of a $100 portfolio = $10). Never express a buy as a coin quantity: many meme coins cost fractions of a cent, so coin quantities produce dust trades that are rejected. SELL/SWAP sizing: a plain number is a coin quantity, or "N%" for N% of your current holdings of that asset.
+- Size buys meaningfully: several USD at minimum, and respect the max position size constraint.
 - "hold" requires no action: return an empty actions array.
 - CONSISTENCY: if your analysis_summary says the portfolio "needs rebalancing"
   or identifies opportunities, you MUST propose actions that follow through.
