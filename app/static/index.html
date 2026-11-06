@@ -50,6 +50,20 @@
 
   <section id="decisions" class="panel">
     <p class="hint">Every AI decision — executed or rejected — with the reason why. Full transparency.</p>
+    <div class="controls" id="decision-filters">
+      <input id="df-search" type="search" placeholder="🔍 Search asset, reason, tx id…" style="flex:1;min-width:170px" />
+      <select id="df-action" title="Filter by action"><option value="">All actions</option></select>
+      <select id="df-status" title="Filter by status"><option value="">All statuses</option></select>
+      <input id="df-asset" type="text" placeholder="Asset (e.g. DOGE)" style="width:140px" title="Filter by asset" />
+      <input id="df-from" type="date" title="From date" />
+      <input id="df-to" type="date" title="To date" />
+      <input id="df-amount-min" type="number" step="any" placeholder="Min amount" style="width:110px" title="Minimum amount" />
+      <input id="df-amount-max" type="number" step="any" placeholder="Max amount" style="width:110px" title="Maximum amount" />
+      <input id="df-value-min" type="number" step="any" placeholder="Min $" style="width:80px" title="Minimum value ($)" />
+      <input id="df-value-max" type="number" step="any" placeholder="Max $" style="width:80px" title="Maximum value ($)" />
+      <button id="df-clear" type="button">Clear</button>
+    </div>
+    <p class="hint" id="df-count"></p>
     <table id="decisions-table">
       <thead><tr><th>Time</th><th>Action</th><th>Asset</th><th>Amount</th><th>Value $</th><th>P&L/trade $</th><th>Status</th><th>Reason</th></tr></thead>
       <tbody></tbody>

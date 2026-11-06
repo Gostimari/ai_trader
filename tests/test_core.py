@@ -367,6 +367,17 @@ class TestMarketRemovedFromUI:
         controls_body = js[controls_idx:js.index("#btn-pause")]
         assert "loadNews" not in controls_body
 
+    def test_decision_feed_filters_are_wired(self):
+        html = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "index.html")).read()
+        for el in ("df-search", "df-action", "df-status", "df-asset", "df-from", "df-to",
+                   "df-amount-min", "df-amount-max", "df-value-min", "df-value-max", "df-clear"):
+            assert f'id="{el}"' in html
+        js = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "app.js")).read()
+        assert "function renderDecisions()" in js
+        assert "function decisionFilters()" in js
+        main_idx = js.index("async function main()")
+        assert "decisionFilters()" in js[main_idx:]
+
 
 class TestSecretStore:
     def test_roundtrip_file_backend(self, tmp_path, monkeypatch):
@@ -3359,6 +3370,20 @@ class TestExportEndpoint:
         text = r.text
         assert "private_key" not in text
         assert "cash" in body
+
+
+class TestDecisionsEndpoint:
+    def test_decisions_limit_param(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        for i in range(3):
+            db.add_decision({"action": "buy", "asset_in": f"C{i}", "status": "executed"})
+        c = TestClient(srv.app)
+        assert len(c.get("/api/decisions?limit=2").json()["decisions"]) == 2
+        assert len(c.get("/api/decisions").json()["decisions"]) == 3
+        assert len(c.get("/api/decisions?limit=0").json()["decisions"]) == 1
+        assert len(c.get("/api/decisions?limit=99999").json()["decisions"]) == 3
 
 
 class TestImportEndpoint:

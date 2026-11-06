@@ -502,8 +502,8 @@ def wallet_balances():
 
 
 @app.get("/api/decisions")
-def decisions():
-    return {"decisions": db.list_decisions()}
+def decisions(limit: int = 200):
+    return {"decisions": db.list_decisions(limit=max(1, min(limit, 10000)))}
 
 
 @app.get("/api/cycles")

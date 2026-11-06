@@ -94,15 +94,76 @@ function fillSettings(c) {
   $("#full-control-warning").classList.toggle("hidden", c.autonomy_mode !== "full_control");
 }
 
+let _allDecisions = [];
+
 async function loadDecisions() {
-  const d = await api("/api/decisions");
-  $("#decisions-table tbody").innerHTML = d.decisions.map((x) => `
+  const d = await api("/api/decisions?limit=1000");
+  _allDecisions = d.decisions || [];
+  renderDecisions();
+}
+
+function decisionFilterOptions() {
+  const fill = (sel, values) => {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">All</option>' +
+      values.map((v) => `<option${v === cur ? " selected" : ""}>${v}</option>`).join("");
+  };
+  fill($("#df-action"), [...new Set(_allDecisions.map((x) => x.action).filter(Boolean))].sort());
+  fill($("#df-status"), [...new Set(_allDecisions.map((x) => x.status).filter(Boolean))].sort());
+}
+
+function decisionMatches(x) {
+  const q = ($("#df-search").value || "").toLowerCase().trim();
+  const action = $("#df-action").value;
+  const status = $("#df-status").value;
+  const asset = ($("#df-asset").value || "").toLowerCase().trim();
+  const from = $("#df-from").value, to = $("#df-to").value;
+  const aMin = parseFloat($("#df-amount-min").value), aMax = parseFloat($("#df-amount-max").value);
+  const vMin = parseFloat($("#df-value-min").value), vMax = parseFloat($("#df-value-max").value);
+  const ts = x.timestamp || "";
+  if (from && ts.slice(0, 10) < from) return false;
+  if (to && ts.slice(0, 10) > to) return false;
+  if (action && x.action !== action) return false;
+  if (status && x.status !== status) return false;
+  if (asset && !`${x.asset_in || ""} ${x.asset_out || ""}`.toLowerCase().includes(asset)) return false;
+  if (!Number.isNaN(aMin) && !(x.amount != null && x.amount >= aMin)) return false;
+  if (!Number.isNaN(aMax) && !(x.amount != null && x.amount <= aMax)) return false;
+  if (!Number.isNaN(vMin) && !(x.value_usd != null && x.value_usd >= vMin)) return false;
+  if (!Number.isNaN(vMax) && !(x.value_usd != null && x.value_usd <= vMax)) return false;
+  if (q) {
+    const hay = `${ts} ${x.action || ""} ${x.asset_in || ""} ${x.asset_out || ""} `
+      + `${x.status || ""} ${x.reason || ""} ${x.tx_id || ""} ${x.amount ?? ""} ${x.value_usd ?? ""}`.toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+function renderDecisions() {
+  decisionFilterOptions();
+  const rows = _allDecisions.filter(decisionMatches);
+  const count = $("#df-count");
+  if (count) count.textContent =
+    _allDecisions.length ? `Showing ${rows.length} of ${_allDecisions.length} decisions.` : "";
+  $("#decisions-table tbody").innerHTML = rows.map((x) => `
     <tr><td>${x.timestamp?.slice(0, 19)}</td><td>${x.action}</td>
     <td>${x.asset_in || ""}${x.asset_out && x.asset_out !== "USD" ? " → " + x.asset_out : ""}</td>
     <td>${fmt(x.amount, 4)}</td><td>$${fmt(x.value_usd)}</td>
     <td class="${pnlClass(x.pnl_per_trade)}">$${fmt(x.pnl_per_trade)}</td>
     <td>${x.status}</td><td>${x.reason || ""}</td></tr>`).join("")
-    || `<tr><td colspan="8" class="hint">No decisions yet.</td></tr>`;
+    || `<tr><td colspan="8" class="hint">${_allDecisions.length ? "No decisions match the filters." : "No decisions yet."}</td></tr>`;
+}
+
+function decisionFilters() {
+  const ids = ["#df-search", "#df-action", "#df-status", "#df-asset", "#df-from", "#df-to",
+    "#df-amount-min", "#df-amount-max", "#df-value-min", "#df-value-max"];
+  ids.forEach((id) => {
+    const el = $(id);
+    if (el) { el.addEventListener("input", renderDecisions); el.addEventListener("change", renderDecisions); }
+  });
+  $("#df-clear")?.addEventListener("click", () => {
+    ids.forEach((id) => { const el = $(id); if (el) el.value = ""; });
+    renderDecisions();
+  });
 }
 
 
@@ -613,6 +674,7 @@ async function main() {
   buildSeedInputs();
   importModeControls();
   watchlistControls();
+  decisionFilters();
   demoWalletControls();
   loadDemoWallet();
   etherscanKeyControls();

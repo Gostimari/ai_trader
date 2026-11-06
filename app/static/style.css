@@ -70,3 +70,6 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 .news-item a:hover { text-decoration: underline; }
 
 .button-link { display: inline-block; background: var(--accent); color: #111; padding: 8px 16px; border-radius: 8px; text-decoration: none; font-weight: 600; }
+
+#decision-filters input, #decision-filters select { width: auto; }
+#decision-filters input[type="search"] { flex: 1; min-width: 170px; }
