@@ -233,7 +233,10 @@ class ConstraintValidator:
                     price = 0.0
                 if price > 0 and not action.get("_price"):
                     action["_price"] = price
-                self._market.note_asset(pair)
+                try:
+                    self._market.note_asset(pair)
+                except Exception:
+                    pass
 
         amount = self._resolve_amount(action, prices)
 

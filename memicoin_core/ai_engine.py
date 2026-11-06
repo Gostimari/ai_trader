@@ -1102,6 +1102,17 @@ class DecisionEngine:
                         f"{action['asset']!r}; not found in market data, "
                         f"watchlist or wallet holdings")
             action["_contract"] = token
+        try:
+            return self._swap_onchain(cycle_id, action, asset, amount,
+                                      token, chain, prices)
+        except Exception as e:
+            # a crashed swap must never kill the cycle: it becomes a failed
+            # action row in the feed and the cycle continues
+            return f"on-chain swap error on {chain}: {type(e).__name__}: {e}"
+
+    def _swap_onchain(self, cycle_id, action, asset, amount, token, chain,
+                      prices):
+        from .onchain import EVM_CHAINS, wallet_for
         wallet = wallet_for(chain, self._onchain_secrets)
         if not wallet.configured():
             return f"on-chain mode selected but no {chain} private key imported"
@@ -1246,7 +1257,10 @@ class DecisionEngine:
                 if best:
                     addr = (best.get("baseToken") or {}).get("address") or ""
                     if addr:
-                        self.market.note_asset(best)
+                        try:
+                            self.market.note_asset(best)
+                        except Exception:
+                            pass
                         return addr
         except Exception:
             pass

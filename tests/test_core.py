@@ -2067,6 +2067,61 @@ class TestGasFeasibility:
              "amount": 1, "reason": "r"}, "0x" + "2" * 40, 1.0)
         assert err is not None and "gas check failed" in err
 
+    def test_gas_check_rpc_failure_fails_closed(self):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "base"
+        w.cfg = {"native_symbol": "ETH", "chain_id": 8453}
+        w._acct = None
+        def nb(): raise RuntimeError("rpc down")
+        w.native_balance = nb
+        ok, why = w.gas_ok()
+        assert not ok
+        assert "gas check unavailable on base" in why
+        assert "rpc down" in why
+
+    def test_execute_onchain_rpc_error_is_recorded_not_crash(self, db, monkeypatch):
+        import memicoin_core.onchain as oc
+        c = Constraints(paper_trading=False, live_execution_mode="onchain",
+                        onchain_chain="base")
+        class _Store:
+            def has(self, k): return k == "onchain_private_key"
+            def get(self, k): return "0x" + "1" * 64
+        engine = DecisionEngine(db, c, _FakeMarket(), None,
+                                onchain_secrets=_Store())
+        class _FlakyWallet:
+            def configured(self): return True
+            def gas_ok(self, buffer=1.5): raise RuntimeError("rpc down")
+        monkeypatch.setattr(oc, "wallet_for", lambda chain, secrets: _FlakyWallet())
+        err = engine._execute_onchain(
+            "cycle-x",
+            {"type": "buy", "asset": "0x" + "2" * 40,
+             "amount": 1, "reason": "r"}, "0x" + "2" * 40, 1.0)
+        assert err is not None
+        assert "on-chain swap error on base" in err
+        assert "RuntimeError" in err
+
+
+class TestCycleEndpointCrash:
+    def test_crashed_cycle_returns_failed_not_500(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        db.start_cycle()  # open row, as a real mid-cycle crash would leave
+        class _Boom:
+            def run_cycle(self): raise RuntimeError("rpc exploded")
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv, "make_engine", lambda: _Boom())
+        c = TestClient(srv.app)
+        r = c.post("/api/cycle")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "failed"
+        assert "internal error" in body["error"]
+        assert "rpc exploded" in body["error"]
+        rows = db.list_cycles(limit=1)
+        assert rows and rows[0]["status"] == "failed"
+        assert "rpc exploded" in (rows[0].get("error") or "")
+
 
 class TestGasReserve:
     def _wallet(self, native, chain="ethereum", gas_price=30 * 10**9):

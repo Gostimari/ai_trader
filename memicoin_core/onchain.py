@@ -171,10 +171,16 @@ class EVMWallet:
 
     def gas_ok(self, buffer: float = 1.5) -> tuple[bool, str]:
         """Can the wallet pay gas for one swap? Arc passes structurally (USDC
-        is the gas token) but its balance still needs to cover the reserve."""
+        is the gas token) but its balance still needs to cover the reserve.
+        Fails CLOSED: an RPC that cannot be reached means gas cannot be
+        verified, so trading is refused rather than attempted blind."""
         native_symbol = self.cfg.get("native_symbol", "ETH")
-        bal = self.gas_balance()
-        need = self.estimated_gas_cost() * buffer
+        try:
+            bal = self.gas_balance()
+            need = self.estimated_gas_cost() * buffer
+        except Exception as e:
+            return False, (f"gas check unavailable on {self.chain} "
+                           f"(RPC failed: {e}) - refusing to trade blind")
         if native_symbol == "USDC":
             if bal >= need:
                 return True, ""

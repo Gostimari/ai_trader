@@ -645,7 +645,20 @@ def wallet_delete():
 
 @app.post("/api/cycle")
 def run_cycle():
-    result = make_engine().run_cycle()
+    try:
+        result = make_engine().run_cycle()
+    except Exception as e:
+        # a crashed cycle must surface its real reason to the user (and the
+        # log), never a bare 500 - and the open cycle row must be closed
+        import logging
+        import traceback
+        logging.getLogger("uvicorn.error").exception("decision cycle crashed")
+        last = db.list_cycles(limit=1)
+        if last and last[0].get("status") == "running":
+            db.finish_cycle(last[0]["id"], "failed", "", "",
+                            error=f"internal error: {type(e).__name__}: {e}")
+        return {"cycle_id": last[0]["id"] if last else "", "status": "failed",
+                "error": f"internal error: {type(e).__name__}: {e}"}
     _invalidate_view_cache()
     return result
 
