@@ -125,8 +125,7 @@ function controls() {
           ? `\n\u26d4 REJECTED by your constraints (${r.rejected.length}):\n` + r.rejected.map((a) => "  \u2022 " + fmtAction(a)).join("\n")
           : "") +
         (r.executed?.length || r.rejected?.length ? "" : "\nNo actions proposed (hold).");
-      await Promise.all([loadState(), loadDecisions(), loadNews()]);
-  setInterval(loadNews, 600000);
+      await Promise.all([loadState(), loadDecisions()]);
     } catch (e) { $("#cycle-result").textContent = "Failed: " + e.message; }
     $("#btn-cycle").disabled = false;
   });
@@ -623,8 +622,9 @@ async function main() {
   initWalletTab();
   initCyclePolling();
   checkSetup();
-  await Promise.all([loadState(), loadDecisions()]);
+  await Promise.all([loadState(), loadDecisions(), loadNews()]);
   setInterval(loadState, 60000);
+  setInterval(loadNews, 600000);
   checkGasWarnings();
   setInterval(checkGasWarnings, 120000);
 }

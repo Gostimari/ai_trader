@@ -356,6 +356,17 @@ class TestMarketRemovedFromUI:
         js = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "app.js")).read()
         assert "api/market" not in js
 
+    def test_news_is_wired_into_main_not_button_handlers(self):
+        js = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "app.js")).read()
+        main_idx = js.index("async function main()")
+        main_body = js[main_idx:]
+        assert "loadNews()" in main_body
+        assert "setInterval(loadNews" in main_body
+        assert js.count("setInterval(loadNews") == 1
+        controls_idx = js.index("function controls()")
+        controls_body = js[controls_idx:js.index("#btn-pause")]
+        assert "loadNews" not in controls_body
+
 
 class TestSecretStore:
     def test_roundtrip_file_backend(self, tmp_path, monkeypatch):
