@@ -75,6 +75,15 @@ async function loadState() {
   } catch (e) { console.error(e); }
 }
 
+let _cycleNotifs = [];
+
+function pushCycleNotif(ok, msg) {
+  _cycleNotifs.unshift({ icon: ok ? "\u2705" : "\u274c",
+    severity: ok ? "info" : "critical", text: msg });
+  _cycleNotifs = _cycleNotifs.slice(0, 5);
+  refreshNotifications();
+}
+
 function collectNotifications() {
   const items = [];
   if (_setupStatus && !_setupStatus.mistral_key)
@@ -94,7 +103,7 @@ function collectNotifications() {
     items.push({ icon: "\U0001F9EA", severity: "info", text: "Testnet mode \u2014 faucet funds only." });
   if (_lastState?.constraints?.autonomy_mode === "full_control")
     items.push({ icon: "\U0001F916", severity: "warning", text: "Full-control autonomy mode is active \u2014 the AI decides without per-action confirmation." });
-  return items;
+  return items.concat(_cycleNotifs);
 }
 
 function renderNotifications() {
@@ -237,7 +246,7 @@ function controls() {
           ? `\n\u26d4 REJECTED by your constraints (${r.rejected.length}):\n` + r.rejected.map((a) => "  \u2022 " + fmtAction(a)).join("\n")
           : "") +
         (r.executed?.length || r.rejected?.length ? "" : "\nNo actions proposed (hold).");
-      await Promise.all([loadState(), loadDecisions()]);
+      await pollCycles();
     } catch (e) { $("#cycle-result").textContent = "Failed: " + e.message; }
     $("#btn-cycle").disabled = false;
   });
@@ -527,13 +536,7 @@ async function pollCycles() {
     const msg = ok
       ? `Decision cycle finished: ${cy.analysis_summary || "see Decision Feed"}`
       : `Decision cycle ${cy.status}: ${cy.error || "check the Decision Feed"}`;
-    const banner = $("#cycle-banner");
-    if (banner) {
-      banner.textContent = msg;
-      banner.className = ok ? "banner ok" : "banner err";
-      banner.classList.remove("hidden");
-      setTimeout(() => banner.classList.add("hidden"), 30000);
-    }
+    pushCycleNotif(ok, msg);
     if ("Notification" in window && Notification.permission === "granted") {
       new Notification("AI Crypto Trader", { body: msg });
     }

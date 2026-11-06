@@ -562,6 +562,13 @@ class TestOnchainAPI:
             def get(self, k): return "0x" + "11" * 32  # valid non-zero key
         engine = DecisionEngine(db, c, _FakeMarket(), None,
                                 onchain_secrets=_NullStore())
+        import memicoin_core.onchain as oc
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "binance-smart-chain": {"native_symbol": "BNB", "native": 0.05, "tokens": []}}},
+            "solana": None})
+        monkeypatch.setattr(engine.market, "get_prices_for_addresses",
+                            lambda cs: {x.lower(): 3000.0 for x in cs})
         ai_out = json.dumps({
             "analysis_summary": "buy",
             "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 5, "reason": "r"}],
@@ -1400,7 +1407,7 @@ class TestOnchainPortfolioContext:
         assert base_rows[0]["value_usd"] == pytest.approx(0.000529 * 3000.0)
         assert s["total_value_usd"] == pytest.approx(0.000529 * 3000.0)
         assert s["holdings"] == [{"asset": "ETH", "chain": "base",
-                                  "quantity": 0.000529}]
+                                  "quantity": 0.000529, "is_gas": True}]
         assert "only SELL or SWAP" in s["note"]
 
     def test_validator_uses_live_holdings_for_swaps(self, db):
@@ -1445,6 +1452,64 @@ class TestOnchainPortfolioContext:
                             lambda cs: {c.lower(): 3000.0 for c in cs})
         total = engine._live_wallet_total({})
         assert total == pytest.approx(0.000529 * 3000.0)
+
+    def test_real_mode_buy_uses_live_wallet_total(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        class _M:
+            def get_prices_for_addresses(self, cs):
+                return {x.lower(): 3000.0 for x in cs}
+        v = ConstraintValidator(db, c, market=_M())
+        v.set_live_holdings([{"asset": "ETH", "chain": "base", "quantity": 0.000529,
+                              "is_gas": True}],
+                            total_usd=1.18)
+        known = {"TYBG": {"asset": "TYBG", "chain": "base", "contract": "0xabc"}}
+        a = {"type": "buy", "asset": "TYBG", "amount_or_percent": "2.0", "reason": "r"}
+        r = v.validate_action(a, {"TYBG": 0.1}, known)
+        assert r.ok
+        assert a["amount"] == pytest.approx(0.295 / 0.1)
+        assert "clamped" in a["_clamped"]
+
+    def test_real_mode_percent_buy_uses_live_wallet_total(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        class _M:
+            def get_prices_for_addresses(self, cs):
+                return {x.lower(): 3000.0 for x in cs}
+        v = ConstraintValidator(db, c, market=_M())
+        v.set_live_holdings([{"asset": "ETH", "chain": "base", "quantity": 0.005,
+                              "is_gas": True}],
+                            total_usd=10.0)
+        known = {"TYBG": {"asset": "TYBG", "chain": "base", "contract": "0xabc"}}
+        a = {"type": "buy", "asset": "TYBG", "amount_or_percent": "20%", "reason": "r"}
+        r = v.validate_action(a, {"TYBG": 0.1}, known)
+        assert r.ok
+        assert v._resolve_amount(a, {"TYBG": 0.1}) == pytest.approx(2.0 / 0.1)
+
+    def test_real_mode_buy_clamped_to_investable_gas(self, db):
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        class _M:
+            def get_prices_for_addresses(self, cs):
+                return {x.lower(): 3000.0 for x in cs}
+        v = ConstraintValidator(db, c, market=_M())
+        v.set_live_holdings([{"asset": "ETH", "chain": "base", "quantity": 0.000529,
+                              "is_gas": True}],
+                            total_usd=10.0)
+        known = {"TYBG": {"asset": "TYBG", "chain": "base", "contract": "0xabc"}}
+        a = {"type": "buy", "asset": "TYBG", "amount_or_percent": "2.0", "reason": "r"}
+        r = v.validate_action(a, {"TYBG": 0.1}, known)
+        assert r.ok
+        assert a["amount"] == pytest.approx(0.000379 * 3000.0 / 0.1)
+
+    def test_cycle_notifications_in_center_not_banner(self):
+        base = os.path.join(os.path.dirname(__file__), "..", "app", "static")
+        html = open(os.path.join(base, "index.html")).read()
+        assert "cycle-banner" not in html
+        js = open(os.path.join(base, "app.js")).read()
+        assert "cycle-banner" not in js and "banner" not in js
+        assert "function pushCycleNotif(" in js
+        assert "pushCycleNotif(ok, msg);" in js
+        assert "await pollCycles();" in js
+        css = open(os.path.join(base, "style.css")).read()
+        assert ".banner" not in css
 
 
 class TestTokenDiscovery:

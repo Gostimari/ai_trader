@@ -174,7 +174,8 @@ class DecisionEngine:
                     and self.constraints.live_execution_mode == "onchain"):
                 try:
                     portfolio = self._onchain_portfolio_summary(prices)
-                    self.validator.set_live_holdings(portfolio["holdings"])
+                    self.validator.set_live_holdings(
+                        portfolio["holdings"], portfolio["total_value_usd"])
                 except Exception:
                     pass  # fall back to paper book; validator stays conservative
         except MarketDataError as e:
@@ -260,7 +261,8 @@ class DecisionEngine:
                 clamp_note = a.pop("_clamped", None)
                 if clamp_note:
                     a["reason"] = (a.get("reason", "") + " | " + clamp_note).strip(" |")
-                err = self._execute(cycle_id, a, prices)
+                err = self._execute(cycle_id, a, prices,
+                                       live_total_usd=live_total)
                 if err:
                     failed.append(a)
                     self.db.add_decision({
@@ -613,7 +615,8 @@ class DecisionEngine:
             if rows:
                 by_chain["solana"] = rows
                 total += sum(r["value_usd"] for r in rows)
-        holdings = [{"asset": r["asset"], "chain": r["chain"], "quantity": r["quantity"]}
+        holdings = [{"asset": r["asset"], "chain": r["chain"],
+                     "quantity": r["quantity"], "is_gas": r["is_gas"]}
                     for rows in by_chain.values() for r in rows if r["quantity"] > 0]
         summary = {"real_wallet": True, "chains": by_chain, "holdings": holdings,
                    "total_value_usd": total,
@@ -719,10 +722,12 @@ class DecisionEngine:
         return AIDecision.model_validate(json.loads(text[start:end + 1]))
 
     # ---------- execution (paper or live, chosen by constraints) ----------
-    def _execute(self, cycle_id: str, action: dict, prices: dict[str, float]) -> str | None:
+    def _execute(self, cycle_id: str, action: dict, prices: dict[str, float],
+                 live_total_usd: float | None = None) -> str | None:
         """Execute one validated action. Returns error string or None on success."""
         asset = action["asset"]
-        amount = self._resolve_amount(action, prices)
+        amount = self._resolve_amount(action, prices,
+                                      live_total_usd=live_total_usd)
         price = prices.get(asset, 0.0)
         if amount <= 0:
             return f"resolved to non-positive amount for {asset}"
@@ -1170,7 +1175,8 @@ class DecisionEngine:
                 return a.get("chain")
         return None
 
-    def _resolve_amount(self, action: dict, prices: dict[str, float]) -> float:
+    def _resolve_amount(self, action: dict, prices: dict[str, float],
+                        live_total_usd: float | None = None) -> float:
         """Convert absolute or 'N%' amount into an absolute asset quantity.
         Delegates to the SAME shared resolver the constraint validator uses,
         WITH the market module: demo percent buys funded from gas-only chains
@@ -1178,5 +1184,6 @@ class DecisionEngine:
         they resolve to 0 here after passing validation."""
         from .constraints import resolve_action_amount
         val = resolve_action_amount(action, prices, self.tracker, self.db,
-                                    market=self.market)
+                                    market=self.market,
+                                    live_total_usd=live_total_usd)
         return val if val is not None else 0.0

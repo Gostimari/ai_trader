@@ -20,7 +20,8 @@ class ValidationResult:
 
 
 def resolve_action_amount(action: dict, prices: dict[str, float],
-                           tracker, db, market=None) -> float | None:
+                           tracker, db, market=None,
+                           live_total_usd: float | None = None) -> float | None:
     """Resolve an action's amount_or_percent into absolute asset units.
     Raises nothing; returns None when unresolvable."""
     raw = action.get("amount")
@@ -60,8 +61,10 @@ def resolve_action_amount(action: dict, prices: dict[str, float],
     pct = val / 100.0
     if action.get("type") == "buy":
         # resolve against the funds that will actually pay:
-        # paper mode -> paper portfolio; demo mode -> demo wallet spendables
-        total = tracker.total_value(prices)
+        # onchain mode -> imported wallet; demo mode -> demo wallet
+        # spendables; paper mode -> paper portfolio
+        total = (live_total_usd if live_total_usd is not None
+                 else tracker.total_value(prices))
         price = prices.get(asset, 0.0)
         if getattr(db, "demo_mode_percent", False):
             from .demowallet import DemoWallet, NATIVE_WRAPPED
@@ -123,6 +126,7 @@ class ConstraintValidator:
         # live holdings snapshot injected by the engine each onchain cycle,
         # so sell/swap validation sees the REAL wallet (paper books are empty)
         self.live_holdings: list[dict] | None = None
+        self.live_wallet_total: float | None = None
 
     def _market_addr_prices(self, contracts):
         if self._market is None:
@@ -269,8 +273,32 @@ class ConstraintValidator:
                     f"Buy of ${cost:.2f} is below the minimum trade size "
                     f"${c.min_trade_usd:.2f} (dust guard). Buys are sized in USD.",
                 )
-            # portfolio total: paper books in paper mode; demo wallet otherwise
-            if getattr(self.db, "demo_mode_percent", False):
+            # real mode: cap the buy by the investable funds on the token's
+            # chain (gas-token balance minus the gas reserve) so the executor
+            # never attempts an unfundable buy
+            if (self.constraints.live_execution_mode == "onchain"
+                    and self.live_holdings is not None):
+                investable = self._live_investable_usd(asset, known_assets)
+                if investable < c.min_trade_usd:
+                    return ValidationResult(
+                        False,
+                        f"Only ${investable:.2f} is investable on the token's "
+                        f"chain after the gas reserve (below the "
+                        f"${c.min_trade_usd:.2f} minimum trade).")
+                if cost > investable + 1e-9:
+                    cost = investable
+                    action["amount"] = investable / price
+                    action["amount_or_percent"] = action["amount"]
+                    action["_clamped"] = (f"AI asked for more; clamped to "
+                                          f"${investable:.2f}, the investable funds "
+                                          f"on the token's chain after the gas reserve.")
+            # portfolio total: the imported wallet in onchain mode; the demo
+            # wallet in demo mode; paper books otherwise
+            if (self.constraints.live_execution_mode == "onchain"
+                    and self.live_wallet_total is not None):
+                total = self.live_wallet_total
+                existing_value = self._held_qty(asset) * price
+            elif getattr(self.db, "demo_mode_percent", False):
                 from .demowallet import DemoWallet, NATIVE_WRAPPED
                 demo = DemoWallet(self.db)
                 # gas tokens price via wrapped contracts (not in symbol map)
@@ -320,7 +348,11 @@ class ConstraintValidator:
                         False,
                         f"Max position for {asset} leaves an unusable amount (${room_usd:.4f}).",
                     )
-                cash = self.db.get_cash()
+                if (self.constraints.live_execution_mode == "onchain"
+                        and self.live_holdings is not None):
+                    cash = self._live_investable_usd(asset, known_assets)
+                else:
+                    cash = self.db.get_cash()
                 if room_usd > cash:
                     room_usd = cash
                     clamped_qty = cash / price
@@ -342,8 +374,40 @@ class ConstraintValidator:
                     False, f"Sell amount exceeds holdings of {asset} ({held:.6g}).")
         return ValidationResult(True, "")
 
-    def set_live_holdings(self, rows: list[dict]) -> None:
+    def set_live_holdings(self, rows: list[dict],
+                          total_usd: float | None = None) -> None:
         self.live_holdings = rows
+        self.live_wallet_total = total_usd
+
+    def _live_investable_usd(self, asset: str, known_assets: dict) -> float:
+        """Real mode: investable USD on the token's chain — the chain's
+        gas-token balance minus the adaptive gas reserve, valued in USD."""
+        from .demowallet import (GAS_COST_PER_TX, NATIVE_WRAPPED,
+                                 reserve_swaps_for)
+        chain = (known_assets.get(asset) or {}).get("chain", "")
+        if not chain:
+            return 0.0
+        gas_rows = [r for r in self.live_holdings
+                    if r.get("chain") == chain and r.get("is_gas")]
+        if not gas_rows:
+            return 0.0
+        native_sym = gas_rows[0]["asset"]
+        native_qty = sum(r["quantity"] for r in gas_rows)
+        per_tx = GAS_COST_PER_TX.get(chain, 0.0)
+        invest_qty = max(0.0, native_qty
+                         - per_tx * reserve_swaps_for(native_qty, per_tx))
+        if invest_qty <= 0:
+            return 0.0
+        if chain == "arc":
+            return invest_qty
+        w = NATIVE_WRAPPED.get(chain)
+        if not w:
+            return 0.0
+        try:
+            wp = self._market_addr_prices([w])
+        except Exception:
+            return 0.0
+        return invest_qty * wp.get(w.lower(), 0.0)
 
     def _held_qty(self, asset: str) -> float:
         """Total held quantity of an asset in the ACTIVE books: the imported
@@ -413,4 +477,5 @@ class ConstraintValidator:
         Percent strings: buys = % of current portfolio value;
         sells/swaps = % of current holdings of the asset."""
         return resolve_action_amount(action, prices, self.tracker, self.db,
-                                     market=self._market)
+                                     market=self._market,
+                                     live_total_usd=self.live_wallet_total)

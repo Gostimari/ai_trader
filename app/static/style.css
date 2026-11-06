@@ -38,9 +38,6 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 .hint { color: var(--muted); font-size: .8rem; }
 #cycle-result { margin-top: 12px; font-size: .85rem; background: var(--panel); padding: 12px; border-radius: 8px; border: 1px solid var(--border); white-space: pre-wrap; }
 
-.banner { padding: 10px 22px; font-size: .85rem; border-bottom: 1px solid var(--border); }
-.banner.ok { background: #14351f; color: #7ee2a8; }
-.banner.err { background: #4a1f24; color: #ff9aa5; }
 
 .seed-words { display: flex; flex-wrap: wrap; gap: 6px; }
 .seed-word { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: .85rem; }
