@@ -535,7 +535,7 @@ async function pollCycles() {
       setTimeout(() => banner.classList.add("hidden"), 30000);
     }
     if ("Notification" in window && Notification.permission === "granted") {
-      new Notification("MemeCoin AI Trader", { body: msg });
+      new Notification("AI Crypto Trader", { body: msg });
     }
     loadState(); loadDecisions();
   } catch (e) { /* silent */ }
