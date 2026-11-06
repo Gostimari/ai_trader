@@ -30,6 +30,10 @@ class Constraints(BaseModel):
         default=25.0, gt=0, le=100,
         description="Max % of portfolio value in a single asset.",
     )
+    min_trade_usd: float = Field(
+        default=1.0, ge=0,
+        description="Dust guard: reject buys below this USD value.",
+    )
     autonomy_mode: AutonomyMode = "constrained"
     custom_prompt: str = Field(
         default="", description="Behavioral instructions the AI reads before every decision."

@@ -11,7 +11,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from .constraints import ConstraintValidator, STABLECOIN
+from .constraints import ConstraintValidator, STABLECOIN, resolve_action_amount
 from .db import Database, utcnow
 from .market import MarketDataError, MarketDataModule
 from .news import NewsModule
@@ -63,7 +63,9 @@ You MUST respond with ONLY a JSON object, no markdown, matching exactly this sch
 }
 Rules:
 - Use tickers exactly as they appear in the market data provided.
-- amount_or_percent: prefer an absolute quantity of the asset; you may use "N%" meaning N% of current portfolio value for buys, or N% of current holdings for sells.
+- BUY sizing is in USD: a plain number is the USD amount to spend (e.g. 25 means "spend $25"), or use "N%" for N% of total portfolio value (e.g. "10%" of a $100 portfolio = $10). Never express a buy as a coin quantity — many meme coins cost fractions of a cent, so coin quantities produce dust trades that will be rejected.
+- SELL/SWAP sizing: a plain number is a coin quantity, or "N%" for N% of your current holdings of that asset.
+- Size buys so they are meaningful: several USD at minimum, and respect the max position size constraint.
 - "hold" requires no action: return an empty actions array.
 - The execution layer will reject anything violating the user's constraints; do not propose violations.
 - Cash is held in USD (paper mode). To exit a position, sell it.
@@ -240,16 +242,12 @@ class DecisionEngine:
         return None
 
     def _resolve_amount(self, action: dict, prices: dict[str, float]) -> float:
-        """Convert absolute or 'N%' amount into an absolute asset quantity."""
-        raw = action.get("amount_or_percent")
-        if isinstance(raw, str) and raw.strip().endswith("%"):
-            pct = float(raw.strip().rstrip("%"))
-            if action["type"] == "buy":
-                total = self.tracker.total_value(prices)
-                budget = total * pct / 100
-                price = prices.get(action["asset"], 0.0)
-                return budget / price if price > 0 else 0.0
-            if action["type"] in ("sell", "swap"):
-                pos = self.db.get_position(action["asset"])
-                return (pos["quantity"] * pct / 100) if pos else 0.0
-        return float(raw)
+        """Convert the action's amount_or_percent into an absolute asset quantity."""
+        holdings = None
+        if action["type"] in ("sell", "swap"):
+            pos = self.db.get_position(action["asset"])
+            holdings = pos["quantity"] if pos else 0.0
+        qty, _ = resolve_action_amount(
+            action, prices, self.tracker.total_value(prices), holdings_qty=holdings,
+        )
+        return qty if qty is not None else 0.0

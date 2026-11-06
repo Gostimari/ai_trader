@@ -73,6 +73,8 @@
         </select></label>
       <label>Max position size (% of portfolio in one asset)
         <input type="number" id="max_position_pct" step="0.1" min="0.1" max="100" value="25"></label>
+      <label>Minimum trade size in USD (dust guard — smaller buys are rejected)
+        <input type="number" id="min_trade_usd" step="0.5" min="0" value="1"></label>
       <label>Allowed blockchains (comma-separated, e.g. solana, ethereum, base)
         <input type="text" id="allowed_chains" value="solana, ethereum, binance-smart-chain, base, polygon"></label>
       <label>Decision time (UTC)

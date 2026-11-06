@@ -54,7 +54,7 @@ class TestConstraints:
     def test_max_position_size_enforced(self, db):
         c = Constraints(max_position_pct=25.0)
         v = ConstraintValidator(db, c)
-        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 600}, PRICES, ASSETS)
+        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 30}, PRICES, ASSETS)
         assert not r.ok and "Max position size" in r.reason
 
     def test_buy_exceeding_cash_rejected(self, db):
@@ -97,13 +97,34 @@ class TestConstraints:
     def test_valid_buy_passes(self, db):
         c = Constraints()
         v = ConstraintValidator(db, c)
-        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 100}, PRICES, ASSETS)
+        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 20}, PRICES, ASSETS)
         assert r.ok
+
+    def test_buy_amount_is_usd_not_coin_quantity(self, db):
+        c = Constraints()
+        v = ConstraintValidator(db, c)
+        # 10 must mean $10, not 10 SHIB (which would be $0.0001 of dust)
+        r = v.validate_action({"type": "buy", "asset": "SHIB", "amount_or_percent": 10}, PRICES, ASSETS)
+        assert r.ok
+
+    def test_buy_percent_of_portfolio(self, db):
+        c = Constraints(max_position_pct=25.0)
+        v = ConstraintValidator(db, c)
+        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": "20%"}, PRICES, ASSETS)
+        assert r.ok  # 20% of $100 = $20 <= $25 max position
+        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": "30%"}, PRICES, ASSETS)
+        assert not r.ok and "Max position size" in r.reason
+
+    def test_dust_buy_rejected(self, db):
+        c = Constraints(min_trade_usd=1.0)
+        v = ConstraintValidator(db, c)
+        r = v.validate_action({"type": "buy", "asset": "PEPE", "amount_or_percent": 0.5}, PRICES, ASSETS)
+        assert not r.ok and "minimum trade size" in r.reason
 
     def test_full_control_still_enforces_position_limit(self, db):
         c = Constraints(autonomy_mode="full_control", max_position_pct=25.0)
         v = ConstraintValidator(db, c)
-        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 600}, PRICES, ASSETS)
+        r = v.validate_action({"type": "buy", "asset": "DOGE", "amount_or_percent": 30}, PRICES, ASSETS)
         assert not r.ok  # technical limits still apply even in full_control
 
 
@@ -214,7 +235,7 @@ class TestEngineCycle:
         engine = DecisionEngine(db, c, _FakeMarket(), _FakeNews())
         ai_out = json.dumps({
             "analysis_summary": "DOGE momentum looks strong.",
-            "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 200, "reason": "strong 24h momentum"}],
+            "actions": [{"type": "buy", "asset": "DOGE", "amount_or_percent": 20, "reason": "strong 24h momentum"}],
             "confidence": "high",
         })
         monkeypatch.setattr(engine, "_call_mistral", lambda p: ai_out)
@@ -284,6 +305,7 @@ class TestSettings:
         assert c.max_loss_pct == 20.0
         assert c.autonomy_mode == "constrained"
         assert c.paper_trading is True
+        assert c.min_trade_usd == 1.0
         c.custom_prompt = "be careful"
         db.set_setting("constraints", c.to_json())
         c2 = load_constraints(db)

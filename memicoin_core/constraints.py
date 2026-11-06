@@ -19,6 +19,51 @@ class ValidationResult:
     reason: str
 
 
+def resolve_action_amount(
+    action: dict, prices: dict[str, float], total_value: float,
+    holdings_qty: float | None = None,
+) -> tuple[float | None, float | None]:
+    """Normalize ``amount_or_percent`` into ``(quantity, usd_value)``.
+
+    Amount contract (shared by the validator and the executor so they can
+    never disagree):
+    - buy: a plain number is a USD budget (e.g. ``25`` = spend $25);
+      ``"N%"`` is N percent of total portfolio value.
+    - sell/swap: a plain number is an asset quantity; ``"N%"`` is N percent
+      of the current holdings of that asset.
+
+    Returns ``(None, None)`` when unparseable, non-positive, or when a buy
+    has no usable price.
+    """
+    raw = action.get("amount_or_percent")
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    is_pct = text.endswith("%")
+    if is_pct:
+        text = text[:-1].strip()
+    try:
+        value = float(text)
+    except ValueError:
+        return None, None
+    if value <= 0:
+        return None, None
+    a_type = action.get("type")
+    price = prices.get(action.get("asset", ""), 0.0)
+    if a_type == "buy":
+        if price <= 0:
+            return None, None
+        usd = total_value * value / 100 if is_pct else value
+        return usd / price, usd
+    if is_pct:
+        if holdings_qty is None:
+            return None, None
+        qty = holdings_qty * value / 100
+    else:
+        qty = value
+    return qty, qty * price
+
+
 class ConstraintValidator:
     def __init__(self, db, constraints: Constraints):
         self.db = db
@@ -50,7 +95,6 @@ class ConstraintValidator:
 
         a_type = action.get("type")
         asset = action.get("asset", "")
-        amount = self._resolve_amount(action)
 
         if a_type not in ("buy", "sell", "swap"):
             return ValidationResult(False, f"Unknown action type: {a_type!r}")
@@ -61,24 +105,36 @@ class ConstraintValidator:
                 r = self._validate_asset(a, known_assets)
                 if not r.ok:
                     return r
+            pos = self.db.get_position(asset)
+            holdings = pos["quantity"] if pos else 0.0
+            qty, _ = resolve_action_amount(action, prices, 0.0, holdings_qty=holdings)
+            if qty is None or qty <= 0:
+                return ValidationResult(False, "Missing or non-positive amount.")
+            if qty > holdings + 1e-9:
+                return ValidationResult(False, f"Swap amount exceeds holdings of {asset}.")
             return ValidationResult(True, "")
 
         r = self._validate_asset(asset, known_assets)
         if not r.ok:
             return r
 
-        if amount is None or amount <= 0:
-            return ValidationResult(False, "Missing or non-positive amount.")
-
         if a_type == "buy":
             price = prices.get(asset)
             if price is None or price <= 0:
                 return ValidationResult(False, f"No reliable price for {asset}; refusing to buy.")
-            cost = amount * price
+            summary = self.tracker.summary(prices)
+            qty, cost = resolve_action_amount(action, prices, summary["total_value_usd"])
+            if qty is None or qty <= 0:
+                return ValidationResult(False, "Missing or non-positive amount.")
+            if cost < c.min_trade_usd:
+                return ValidationResult(
+                    False,
+                    f"Buy of ${cost:.2f} is below the minimum trade size "
+                    f"${c.min_trade_usd:.2f} (dust guard).",
+                )
             cash = self.db.get_cash()
             if cost > cash:
                 return ValidationResult(False, f"Buy of ${cost:.2f} exceeds available cash ${cash:.2f}.")
-            summary = self.tracker.summary(prices)
             total = summary["total_value_usd"]
             max_usd = total * c.effective_max_position_pct() / 100
             existing = self.db.get_position(asset)
@@ -93,7 +149,10 @@ class ConstraintValidator:
             pos = self.db.get_position(asset)
             if not pos or pos["quantity"] <= 0:
                 return ValidationResult(False, f"No position in {asset} to sell.")
-            if amount > pos["quantity"] + 1e-9:
+            qty, _ = resolve_action_amount(action, prices, 0.0, holdings_qty=pos["quantity"])
+            if qty is None or qty <= 0:
+                return ValidationResult(False, "Missing or non-positive amount.")
+            if qty > pos["quantity"] + 1e-9:
                 return ValidationResult(False, f"Sell amount exceeds holdings of {asset}.")
         return ValidationResult(True, "")
 
@@ -115,18 +174,3 @@ class ConstraintValidator:
                     f"Chain {chain!r} for {asset} is not in allowed chains {allowed}.",
                 )
         return ValidationResult(True, "")
-
-    @staticmethod
-    def _resolve_amount(action: dict) -> float | None:
-        a = action.get("amount_or_percent")
-        if isinstance(a, str):
-            a = a.strip().rstrip("%")
-            if not a:
-                return None
-            try:
-                a = float(a)
-            except ValueError:
-                return None
-        if isinstance(action.get("amount"), (int, float)):
-            return float(action["amount"])
-        return float(a) if a is not None else None
