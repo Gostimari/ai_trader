@@ -5,7 +5,7 @@ import json
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -76,7 +76,38 @@ def export_data():
         "decisions": db.list_decisions(limit=10000),
         "cycles": db.list_cycles(),
         "demo_wallet": db.demo_rows(),
+        "cash": db.get_cash(),
     }
+
+
+@app.post("/api/import")
+def import_data(payload: dict = Body(...), confirm: bool = False):
+    """Restore a backup produced by GET /api/export. Overwrites ALL local
+    state (settings, positions, decisions, cycles, demo wallet, cash).
+    Requires ?confirm=true. Secrets are untouched: wallet/API keys stay in
+    the encrypted store and are never part of a backup."""
+    if not confirm:
+        raise HTTPException(status_code=400,
+                            detail="Import overwrites all local data; call again with ?confirm=true")
+    if not isinstance(payload, dict) or not isinstance(payload.get("settings"), dict):
+        raise HTTPException(status_code=400,
+                            detail="Invalid backup file: expected a JSON document from /api/export")
+    counts: dict = {}
+    counts["settings"] = db.restore_settings(payload.get("settings") or {})
+    if "cash" in payload:
+        try:
+            db.set_cash(float(payload["cash"]))
+            counts["cash"] = 1
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Invalid cash value in backup")
+    try:
+        counts["positions"] = db.restore_positions(payload.get("positions") or [])
+        counts["decisions"] = db.restore_decisions(payload.get("decisions") or [])
+        counts["cycles"] = db.restore_cycles(payload.get("cycles") or [])
+        counts["demo_wallet"] = db.restore_demo_wallet(payload.get("demo_wallet") or [])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"imported": counts}
 
 
 @app.get("/api/state")

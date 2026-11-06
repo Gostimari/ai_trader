@@ -85,7 +85,7 @@ RPC endpoints can be overridden per chain via `MEMICOIN_RPC_<CHAIN>` (e.g.
 ## News & data
 
 - The dashboard has a **Crypto news** section (CoinDesk / Cointelegraph / Decrypt RSS, no API key, 10-minute cache). If all feeds are unreachable the section says so instead of failing silently.
-- **Settings · 5 · Data** exports a full JSON backup of your local state (settings, positions, decisions, cycles, demo wallet) via `/api/export`. Wallet keys are never exported — they stay in the encrypted store.
+- **Settings · 5 · Data** exports a full JSON backup of your local state (settings, positions, decisions, cycles, demo wallet, cash) via `/api/export`, and restores one via the Import button (`POST /api/import?confirm=true`). Import overwrites all local data; wallet keys are never part of a backup — they stay in the encrypted store.
 - The **Default on-chain chain** setting (Settings · 2) sets Mode B's home chain; `/api/go-live` also accepts it. Profit-target and max-loss stops work in demo and on-chain modes too: the app snapshots your wallet value (`pnl_baseline_usd`) at the first cycle after any wallet change and measures P&L against it.
 - The daily scheduler retries a failed cycle every 30 minutes (AI down, market data down) instead of skipping the day, and a manual "Run now" can never overlap a scheduled cycle.
 

@@ -3347,6 +3347,53 @@ class TestExportEndpoint:
         assert any(r_["asset"] == "USDC" for r_ in body["demo_wallet"])
         text = r.text
         assert "private_key" not in text
+        assert "cash" in body
+
+
+class TestImportEndpoint:
+    def _client(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        return TestClient(srv.app)
+
+    def test_import_round_trip_restores_all_state(self, db, monkeypatch):
+        import app.server as srv
+        c = self._client(db, monkeypatch)
+        db.set_setting("risk_aggressiveness", 0.7)
+        db.upsert_position("DOGE", "binance-smart-chain", 10, 1.0)
+        db.add_decision({"action": "buy", "asset_in": "DOGE", "status": "executed"})
+        db.set_cash(42.5)
+        db.demo_set("arc", "USDC", 25.0, "")
+        backup = c.get("/api/export").json()
+
+        other = Database(str(db.path) + ".other")
+        monkeypatch.setattr(srv, "db", other)
+        other.set_setting("risk_aggressiveness", 0.1)
+        other.upsert_position("PEPE", "base", 999, 999.0)
+        other.set_cash(1.0)
+        other.demo_set("base", "ETH", 3.0, "")
+
+        r = c.post("/api/import?confirm=true", json=backup)
+        assert r.status_code == 200
+        assert r.json()["imported"]["settings"] >= 1
+        assert other.get_setting("risk_aggressiveness") == 0.7
+        assert [p["asset"] for p in other.get_positions()] == ["DOGE"]
+        assert other.get_cash() == 42.5
+        assert [r_["asset"] for r_ in other.demo_rows()] == ["USDC"]
+        assert len(other.list_decisions(10)) == 1
+
+    def test_import_without_confirm_rejected(self, db, monkeypatch):
+        c = self._client(db, monkeypatch)
+        r = c.post("/api/import", json={"settings": {}})
+        assert r.status_code == 400
+
+    def test_import_invalid_payload_rejected(self, db, monkeypatch):
+        c = self._client(db, monkeypatch)
+        r = c.post("/api/import?confirm=true", json={"nope": 1})
+        assert r.status_code == 400
+        r2 = c.post("/api/import?confirm=true", json={"settings": "not-a-dict"})
+        assert r2.status_code == 400
 
 
 class TestOnchainChainSetting:

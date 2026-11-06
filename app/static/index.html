@@ -227,9 +227,11 @@
 
     <h3 style="margin-top:28px">5 · Data</h3>
     <p class="hint">Download a full JSON backup of your local state (settings, positions,
-      decisions, cycles, demo wallet). Wallet keys are NOT exported — they stay encrypted.</p>
+      decisions, cycles, demo wallet, cash). Wallet keys are NOT exported — they stay encrypted.</p>
     <div class="controls">
       <a id="btn-export" class="button-link" href="/api/export" download="memicoin-backup.json">⬇ Export data (JSON)</a>
+      <input id="import-file" type="file" accept="application/json,.json" style="display:none" />
+      <button id="btn-import" class="button-link" type="button">⬆ Import backup</button>
     </div>
   </section>
 

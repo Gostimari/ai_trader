@@ -309,6 +309,99 @@ class Database:
             self.conn.execute("DELETE FROM demo_wallet")
             self.conn.commit()
 
+    # ---------- restore (import backup) ----------
+    def restore_settings(self, settings: dict) -> int:
+        if not isinstance(settings, dict):
+            raise ValueError("settings must be an object")
+        for key, value in settings.items():
+            self.set_setting(str(key), value)
+        return len(settings)
+
+    def restore_positions(self, rows: list) -> int:
+        if not isinstance(rows, list):
+            raise ValueError("positions must be a list")
+        with _lock:
+            self.conn.execute("DELETE FROM positions")
+            n = 0
+            for r in rows:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO positions (asset, chain, quantity, "
+                        "cost_basis_usd, updated_at) VALUES (?,?,?,?,?)",
+                        (r["asset"], r.get("chain"), float(r.get("quantity") or 0),
+                         float(r.get("cost_basis_usd") or 0),
+                         r.get("updated_at") or utcnow()))
+                    n += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self.conn.commit()
+        return n
+
+    def restore_decisions(self, rows: list) -> int:
+        if not isinstance(rows, list):
+            raise ValueError("decisions must be a list")
+        with _lock:
+            self.conn.execute("DELETE FROM decisions")
+            n = 0
+            for r in rows:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO decisions (id, cycle_id, timestamp, action, "
+                        "asset_in, asset_out, amount, value_usd, pnl_per_trade, status, "
+                        "reason, tx_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (r.get("id", new_id()), r.get("cycle_id"),
+                         r.get("timestamp", utcnow()), r["action"], r.get("asset_in"),
+                         r.get("asset_out"), r.get("amount"), r.get("value_usd"),
+                         r.get("pnl_per_trade"), r["status"], r.get("reason", ""),
+                         r.get("tx_id")))
+                    n += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self.conn.commit()
+        return n
+
+    def restore_cycles(self, rows: list) -> int:
+        if not isinstance(rows, list):
+            raise ValueError("cycles must be a list")
+        with _lock:
+            self.conn.execute("DELETE FROM cycles")
+            n = 0
+            for r in rows:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO cycles (id, timestamp, status, ai_input, "
+                        "ai_output, analysis_summary, confidence, error) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (r["id"], r.get("timestamp", utcnow()), r.get("status", "unknown"),
+                         r.get("ai_input"), r.get("ai_output"),
+                         r.get("analysis_summary"), r.get("confidence"), r.get("error")))
+                    n += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self.conn.commit()
+        return n
+
+    def restore_demo_wallet(self, rows: list) -> int:
+        if not isinstance(rows, list):
+            raise ValueError("demo_wallet must be a list")
+        with _lock:
+            self.conn.execute("DELETE FROM demo_wallet")
+            n = 0
+            for r in rows:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO demo_wallet (id, chain, asset, contract, "
+                        "balance, is_gas, cost_basis_usd) VALUES (?,?,?,?,?,?,?)",
+                        (r.get("id", new_id()), r["chain"], r["asset"],
+                         r.get("contract", ""), float(r.get("balance") or 0),
+                         1 if r.get("is_gas") else 0,
+                         float(r.get("cost_basis_usd") or 0)))
+                    n += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self.conn.commit()
+        return n
+
     # ---------- pending bridges (CCTP burn confirmed, mint awaiting
     # attestation; completed on a later cycle) ----------
     def add_pending_bridge(self, src_chain: str, dst_chain: str, amount: float,

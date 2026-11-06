@@ -541,6 +541,27 @@ function demoWalletControls() {
     try { const r = await api("/api/go-demo", {}); alert("Demo wallet mode ON. Trades will settle against your demo balances."); refreshModeUI(); }
     catch (e) { alert("Failed: " + e.message); }
   });
+  const fileInput = $("#import-file");
+  if (fileInput) {
+    $("#btn-import").addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files[0];
+      fileInput.value = "";
+      if (!file) return;
+      let payload;
+      try { payload = JSON.parse(await file.text()); }
+      catch (e) { alert("Not a valid JSON file: " + e.message); return; }
+      if (!confirm("Import this backup? It OVERWRITES all current settings, positions, decisions, cycles, demo wallet and cash. Wallet keys are not affected.")) return;
+      try {
+        const r = await api("/api/import?confirm=true", payload);
+        const c = r.imported || {};
+        alert(`Backup imported: ${c.settings || 0} settings, ${c.positions || 0} positions, `
+              + `${c.decisions || 0} decisions, ${c.cycles || 0} cycles, `
+              + `${c.demo_wallet || 0} demo wallet rows.`);
+        loadState(); loadDemoWallet();
+      } catch (e) { alert("Import failed: " + e.message); }
+    });
+  }
 }
 
 async function loadNews() {
