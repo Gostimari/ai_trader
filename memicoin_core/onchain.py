@@ -259,7 +259,15 @@ class EVMWallet:
 # ---------- writes ----------
     def _send(self, tx: dict) -> str:
         signed = self._account().sign_transaction(tx)
-        raw = signed.get("raw_transaction") or signed.get("rawTransaction")
+        # eth_account >= 0.13 returns a SignedTransaction dataclass (attribute
+        # access); older versions return an AttributeDict (dict access)
+        raw = getattr(signed, "raw_transaction", None)
+        if raw is None:
+            raw = getattr(signed, "rawTransaction", None)
+        if raw is None and isinstance(signed, dict):
+            raw = signed.get("raw_transaction") or signed.get("rawTransaction")
+        if raw is None:
+            raise RuntimeError("could not extract raw bytes from signed transaction")
         h = self.w3.eth.send_raw_transaction(raw)
         receipt = self._retry_on_rpc_failure(
             lambda: self.w3.eth.wait_for_transaction_receipt(h, timeout=180))

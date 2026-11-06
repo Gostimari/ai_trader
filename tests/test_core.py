@@ -2192,6 +2192,31 @@ class TestGasFeasibility:
                 if addr:
                     Web3.to_checksum_address(addr)
 
+    def test_send_extracts_raw_from_signed_transaction_dataclass(self):
+        # regression: eth_account >= 0.13 returns a SignedTransaction
+        # dataclass; _send used dict access and every swap died at signing
+        from memicoin_core.onchain import EVMWallet
+        from eth_account import Account
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "base"
+        w.cfg = {"native_symbol": "ETH", "chain_id": 8453}
+        w._acct = Account.from_key("0x" + "22" * 32)
+        tx = {"from": w._acct.address, "to": w._acct.address, "data": b"",
+              "value": 0, "nonce": 0, "chainId": 8453, "gas": 21000,
+              "gasPrice": 10 ** 9}
+        sent = []
+        class _Eth:
+            def send_raw_transaction(self, raw):
+                sent.append(raw)
+                return b"\x11" * 32
+            def wait_for_transaction_receipt(self, h, timeout=180):
+                return {"status": 1}
+        w.w3 = type("W3", (), {"eth": _Eth()})()
+        w._rpcs = ["https://x"]
+        w._rpc_idx = 0
+        assert w._send(tx) == ("11" * 32)  # hex() without 0x prefix
+        assert sent and len(sent[0]) > 100
+
     def test_validated_amount_pinned_for_execution(self, db):
         class _M:
             def get_prices_for_addresses(self, addrs):
