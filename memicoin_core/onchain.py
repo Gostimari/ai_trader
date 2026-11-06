@@ -34,7 +34,7 @@ EVM_CHAINS = {
         "rpc": "https://mainnet.base.org",
         "rpc_fallbacks": ["https://base-rpc.publicnode.com",
                           "https://base.drpc.org"],
-        "router": "0x4752ba5DBc36f75D9e232F321687625204392e48",  # Uniswap V2 on Base
+        "router": "0x4752ba5Dbc36f75D9E232F321687625204392e48",  # Uniswap V2 on Base
         "weth": "0x4200000000000000000000000000000000000006",
         "explorer": "https://basescan.org/tx/",
     },
@@ -42,7 +42,7 @@ EVM_CHAINS = {
         "chain_id": 137,
         "rpc": "https://polygon-bor-rpc.publicnode.com",
         "rpc_fallbacks": ["https://polygon.drpc.org"],
-        "router": "0xa5E0829CaCEd8fAdd424714229311691BfBe27c8",  # QuickSwap (UniV2)
+        "router": "0xA5e0829CAced8fADd424714229311691bfBe27C8",  # QuickSwap (UniV2)
         "weth": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
         "explorer": "https://polygonscan.com/tx/",
     },
@@ -374,13 +374,15 @@ class EVMWallet:
         import os
         if self.cfg.get("router"):
             return self.cfg["router"]
-        return os.environ.get(f"MEMICOIN_{self.chain.upper().replace('-', '_')}_ROUTER")
+        r = os.environ.get(f"MEMICOIN_{self.chain.upper().replace('-', '_')}_ROUTER")
+        return r.lower() if r else r
 
     def _weth(self) -> str | None:
         import os
         if self.cfg.get("weth"):
             return self.cfg["weth"]
-        return os.environ.get(f"MEMICOIN_{self.chain.upper().replace('-', '_')}_WETH")
+        w = os.environ.get(f"MEMICOIN_{self.chain.upper().replace('-', '_')}_WETH")
+        return w.lower() if w else w
 
     def _no_router_error(self) -> str:
         return (f"No DEX router configured for {self.chain} yet — swaps are disabled "

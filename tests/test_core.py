@@ -2180,6 +2180,43 @@ class TestGasFeasibility:
         assert w.native_balance() == 1.0
         assert w._rpc_idx == 1
 
+    def test_chain_router_and_weth_addresses_are_checksum_valid(self):
+        # regression: the base/polygon router constants carried invalid
+        # EIP-55 checksums, crashing EVERY swap on those chains with
+        # "Address has an invalid EIP-55 checksum"
+        from web3 import Web3
+        from memicoin_core.onchain import EVM_CHAINS
+        for chain, cfg in EVM_CHAINS.items():
+            for key in ("router", "weth"):
+                addr = cfg.get(key)
+                if addr:
+                    Web3.to_checksum_address(addr)
+
+    def test_validated_amount_pinned_for_execution(self, db):
+        class _M:
+            def get_prices_for_addresses(self, addrs):
+                return {"0x4200000000000000000000000000000000000006": 3000.0}
+        c = Constraints(paper_trading=False, live_execution_mode="onchain",
+                        onchain_chain="base", max_position_pct=25.0)
+        v = ConstraintValidator(db, c, market=_M())
+        v.set_live_holdings(
+            [{"asset": "ETH", "chain": "base", "quantity": 0.002761,
+              "is_gas": True}], total_usd=6.15)
+        known = {"PEPE": {"asset": "PEPE", "chain": "base",
+                          "contract": "0x" + "dd" * 20}}
+        action = {"type": "buy", "asset": "PEPE",
+                  "amount_or_percent": "25%", "reason": "r"}
+        r = v.validate_action(action, {"PEPE": 0.00001}, known)
+        assert r.ok, r.reason
+        pinned = action.get("amount")
+        assert pinned is not None and pinned > 0
+        # execution-side re-resolution WITHOUT live context (wallet re-read
+        # failed) must still return exactly the validated amount
+        from memicoin_core.constraints import resolve_action_amount
+        again = resolve_action_amount(action, {"PEPE": 0.00001}, v.tracker, db)
+        assert again == pinned
+
+
     def test_rpc_failover_ignores_non_connection_errors(self):
         from memicoin_core.onchain import EVMWallet
         w = EVMWallet.__new__(EVMWallet)

@@ -295,6 +295,7 @@ class ConstraintValidator:
                     f"Do not infer holdings from past decisions.")
             if amount is None or amount <= 0:
                 return ValidationResult(False, "Missing or non-positive amount.")
+            action["amount"] = amount
             return ValidationResult(True, "")
 
         # resolve asset: the AI may reference by symbol OR contract address.
@@ -371,8 +372,9 @@ class ConstraintValidator:
                         f"trade).{hint}")
                 if cost > investable + 1e-9:
                     cost = investable
-                    action["amount"] = investable / price
-                    action["amount_or_percent"] = action["amount"]
+                    amount = investable / price
+                    action["amount"] = amount
+                    action["amount_or_percent"] = amount
                     action["_clamped"] = (f"AI asked for more; clamped to "
                                           f"${investable:.2f}, the investable funds "
                                           f"on the token's chain after the gas reserve.")
@@ -456,6 +458,7 @@ class ConstraintValidator:
             if amount > held + 1e-9:
                 return ValidationResult(
                     False, f"Sell amount exceeds holdings of {asset} ({held:.6g}).")
+        action["amount"] = amount
         return ValidationResult(True, "")
 
     def set_live_holdings(self, rows: list[dict],

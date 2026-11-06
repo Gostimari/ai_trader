@@ -197,7 +197,11 @@ class DecisionEngine:
 
         live_total = None
         if not self.constraints.paper_trading:
-            live_total = self._live_wallet_total(prices)
+            # prefer the total already read with the portfolio summary: one
+            # wallet round-trip per cycle, and execution resolves percent
+            # buys against the SAME total validation used
+            live_total = (getattr(self.validator, "live_wallet_total", None)
+                          or self._live_wallet_total(prices))
             self._ensure_pnl_baseline(live_total)
         stop = self.validator.check_stop_conditions(prices, live_total_usd=live_total)
         if not stop.ok:
