@@ -3099,6 +3099,75 @@ class TestEmptyActionsChallenge:
         assert len(calls) == 2  # demo funds exist -> challenge fired
         db.demo_clear()
 
+    def test_onchain_hold_with_live_funds_challenged(self, db, monkeypatch):
+        """Onchain mode: the challenge must look at the LIVE wallet, not the
+        paper book - a funded real wallet with a stale/empty paper book now
+        triggers the challenge."""
+        db.set_cash(0.0)
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        monkeypatch.setattr(engine, "_onchain_portfolio_summary", lambda prices: {
+            "real_wallet": True, "total_value_usd": 5.0, "chains": {
+                "base": [{"asset": "BRETT", "chain": "base", "quantity": 37.0,
+                          "is_gas": False, "value_usd": 5.0,
+                          "contract": "0x" + "de" * 20}]}},
+            raising=False)
+        empty = json.dumps({"analysis_summary": "x", "actions": [],
+                            "confidence": "low"})
+        calls = []
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: calls.append(p) or empty)
+        engine.run_cycle()
+        assert len(calls) == 2  # live funds exist -> challenge fired
+
+    def test_onchain_hold_with_paper_cash_only_not_challenged(self, db, monkeypatch):
+        """Regression: the challenge read the PAPER book cash in every mode -
+        in onchain mode a phantom paper balance fired challenges (extra LLM
+        call, 'portfolio has investable funds') while the real wallet had
+        nothing to deploy. Paper cash must be ignored outside paper mode."""
+        db.set_cash(100.0)
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        monkeypatch.setattr(engine, "_onchain_portfolio_summary", lambda prices: {
+            "real_wallet": True, "total_value_usd": 0.001, "chains": {
+                "base": [{"asset": "ETH", "chain": "base", "quantity": 1e-9,
+                          "is_gas": True, "value_usd": 0.001}]}},
+            raising=False)
+        calls = []
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: calls.append(p) or json.dumps(
+                                {"analysis_summary": "h", "actions": [],
+                                 "confidence": "low"}))
+        engine.run_cycle()
+        assert len(calls) == 1  # no challenge: live wallet has nothing deployable
+
+    def test_onchain_investable_native_triggers_challenge(self, db, monkeypatch):
+        """A funded gas balance (minus the reserve) on a routable chain is
+        deployable - the challenge must fire on it alone."""
+        import memicoin_core.onchain as oc
+        db.set_cash(0.0)
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        engine = DecisionEngine(db, c, _FakeMarket(), None)
+        monkeypatch.setattr(engine, "_onchain_portfolio_summary", lambda prices: {
+            "real_wallet": True, "total_value_usd": 2.74, "chains": {
+                "base": [{"asset": "ETH", "chain": "base", "quantity": 0.001,
+                          "is_gas": True, "value_usd": 2.74}]}},
+            raising=False)
+
+        class _FakeW:
+            def __init__(self, secrets, chain):
+                assert chain == "base"
+            def investable_native(self):
+                return 0.0009
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        empty = json.dumps({"analysis_summary": "x", "actions": [],
+                            "confidence": "low"})
+        calls = []
+        monkeypatch.setattr(engine, "_call_mistral",
+                            lambda p: calls.append(p) or empty)
+        engine.run_cycle()
+        assert len(calls) == 2  # investable native gas -> challenge fired
+
     def test_challenge_failure_keeps_original_hold(self, db, monkeypatch):
         db.set_cash(100.0)
         c = Constraints(paper_trading=True)

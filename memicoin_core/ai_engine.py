@@ -286,15 +286,17 @@ class DecisionEngine:
         # funds exist, push back ONCE - models sometimes describe a plan in
         # the summary but forget to commit it to actions.
         if not decision.actions:
+            # funds check is MODE-SPECIFIC: paper cash is meaningless in
+            # demo/onchain modes (a stale paper book used to trigger the
+            # challenge while the real wallet had nothing to deploy)
             has_funds = False
-            try:
-                summary = self.tracker.summary(prices)
-                if summary.get("cash_usd", 0) > 1:
-                    has_funds = True
-            except Exception:
-                pass
-            if (not self.constraints.paper_trading
-                    and self.constraints.live_execution_mode == "demo"):
+            if self.constraints.paper_trading:
+                try:
+                    summary = self.tracker.summary(prices)
+                    has_funds = summary.get("cash_usd", 0) > 1
+                except Exception:
+                    pass
+            elif self.constraints.live_execution_mode == "demo":
                 from .demowallet import DemoWallet
                 demo = DemoWallet(self.db)
                 for row in demo.rows():
@@ -308,6 +310,8 @@ class DecisionEngine:
                     if demo.investable_gas(ch) > 0:
                         has_funds = True
                         break
+            elif self.constraints.live_execution_mode == "onchain":
+                has_funds = self._onchain_has_investable(prices)
             if has_funds:
                 challenge = (
                     "Your previous response proposed ZERO actions, but your own "
@@ -555,6 +559,34 @@ class DecisionEngine:
                 "note": "Portfolio is the DEMO wallet. Fund buys with USDC "
                         "where available, or with investable gas-token amounts. "
                         "Buys settle against these balances (simulated)."}
+
+    def _onchain_has_investable(self, prices: dict[str, float]) -> bool:
+        """Live-wallet funds check for the empty-actions challenge in onchain
+        mode. Only funds the bot could actually deploy count: a non-gas
+        token worth >= $0.01 (sellable/swappable) or investable native gas
+        (balance minus the reserve) on a chain with a DEX router."""
+        from .onchain import EVM_CHAINS, EVMWallet
+        try:
+            portfolio = self._onchain_portfolio_summary(prices)
+        except Exception:
+            return False
+        for rows in (portfolio.get("chains") or {}).values():
+            for r in rows:
+                if not r.get("is_gas") and (r.get("value_usd") or 0) >= 0.01:
+                    return True
+        for chain, rows in (portfolio.get("chains") or {}).items():
+            if not EVM_CHAINS.get(chain, {}).get("router"):
+                continue
+            if not any(r.get("is_gas") and (r.get("quantity") or 0) > 0
+                       for r in rows):
+                continue
+            try:
+                w = EVMWallet(self._onchain_secrets, chain)
+                if w.investable_native() > 0:
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _onchain_portfolio_summary(self, prices: dict[str, float]) -> dict:
         """Portfolio state built from the IMPORTED WALLET (real mode) — what
