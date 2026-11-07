@@ -55,15 +55,16 @@ EVM_CHAINS = {
         "explorer": "https://bscscan.com/tx/",
     },
     # Arc by Circle (docs.arc.io): EVM-compatible, chain ID 5042, USDC is the
-    # native gas token (18 decimals). No meme-coin DEX router exists there yet
-    # (the chain is stablecoin-native; Circle's Swap Kit is stablecoin-only),
-    # so router/weth stay unset: wallet import and balance reads work, swaps
-    # are refused with a clear error until a router is configured via
-    # MEMICOIN_ARC_ROUTER / MEMICOIN_ARC_WETH.
+    # native gas token (18 decimals). DEX: ArcSwap, a Uniswap-V2 fork verified
+    # live on rpc.mainnet.arc.io (factory() matches its factory; WETH()
+    # reverts - ArcSwap pairs token<->USDC directly and the router accepts no
+    # native value, so buys route through the canonical USDC contract).
+    # allPairsLength() = 0 at verification time: pairs are created on demand,
+    # swaps revert until liquidity exists.
     "arc": {
         "chain_id": 5042,
         "rpc": "https://rpc.mainnet.arc.io",
-        "router": None,
+        "router": "0xB433a6F3c690D17E78aa3dD87eC01cdc304278a9",  # ArcSwap (UniV2 fork)
         "weth": None,
         "explorer": "https://explorer.arc.io/tx/",
         "native_symbol": "USDC",
@@ -317,6 +318,23 @@ class EVMWallet:
             data = token_c.encode_abi("approve", args=[router, 2 ** 256 - 1])
             self._send(self._base_tx(token, data))
 
+    def _swap_path(self, token_in: str, token_out: str) -> list[str]:
+        """Hop list shared by quotes AND swaps - the two must always agree,
+        otherwise the quote prices one route while the swap executes another.
+        Standard V2 routers route token->token through the wrapped native
+        ([in, weth, out]); direct pairs when an endpoint IS the wrapped
+        native; ArcSwap has no wrapped native at all - every pair is
+        token<->USDC direct."""
+        tin = _checksum(token_in).lower()
+        tout = _checksum(token_out).lower()
+        weth = self._weth()
+        if not weth:
+            return [tin, tout]
+        w = _checksum(weth).lower()
+        if tin == w or tout == w:
+            return [tin, tout]
+        return [tin, w, tout]
+
     def router_quote_min_out(self, token_in: str, token_out: str,
                              amount_in: float, slippage_pct: float) -> float:
         """On-chain quote (router getAmountsOut) for a token->token swap,
@@ -332,8 +350,7 @@ class EVMWallet:
                 "outputs": [{"name": "", "type": "uint256[]"}],
                 "type": "function"}]
         dec_in = self._erc20_decimals(token_in)
-        path = [_checksum(token_in),
-                _checksum(token_out)]
+        path = self._swap_path(token_in, token_out)
         c = self.w3.eth.contract(address=_checksum(router), abi=abi)
         amounts = self._retry_on_rpc_failure(
             lambda: c.functions.getAmountsOut(
@@ -373,9 +390,7 @@ class EVMWallet:
                     "type": "function"}]
             import time
             deadline = int(time.time()) + 1200
-            path = [_checksum(token_in),
-                    self.cfg["weth"],
-                    _checksum(token_out)]
+            path = self._swap_path(token_in, token_out)
             router_c = self.w3.eth.contract(
                 address=_checksum(router), abi=abi)
             data = router_c.encode_abi(
@@ -455,10 +470,13 @@ class EVMWallet:
                 return TxResult(False, error=(
                     "refusing to swap without a slippage bound: no "
                     "min_amount_out computed from market prices"))
-            self.verify_router(router)
             weth = self._weth()
             if not weth:
-                return TxResult(False, error=f"No wrapped-native token configured for {self.chain}")
+                return TxResult(False, error=(
+                    f"No wrapped-native token configured for {self.chain}: "
+                    f"its DEX takes no native value - buys must route "
+                    f"through the chain's stablecoin contract instead"))
+            self.verify_router(router)
             dec_out = self._erc20_decimals(token_out)
             raw_min = max(1, int(min_amount_out * 10 ** dec_out))
             abi = [{"constant": False,
@@ -601,10 +619,13 @@ USDC_ADDRESSES = {
     "sepolia": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
     "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 }
-# Arc: USDC is the native gas token — no contract needed.
+# Arc: USDC is the native gas token; the canonical ERC-20 USDC sits at the
+# reserved address 0x3600...0000 (verified live: symbol USDC, 6 decimals,
+# same ledger as the native balance) - token swaps route through it.
 # BSC: no Circle-native USDC deployment; liquidation there falls back to
 # wrapped native (WBNB) and is labeled as such in the results.
 SOLANA_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZ8nMYp7F"
+ARC_USDC = "0x3600000000000000000000000000000000000000"  # canonical USDC on Arc
 
 
 def stablecoin_target(chain: str) -> tuple[str, str]:
@@ -612,7 +633,7 @@ def stablecoin_target(chain: str) -> tuple[str, str]:
     Falls back to the chain's wrapped native token where no verified
     Circle USDC exists; the caller reports the label honestly."""
     if chain == "arc":
-        return EVM_CHAINS["arc"]["native_symbol"], "native USDC"
+        return ARC_USDC, "USDC"
     if chain in USDC_ADDRESSES:
         return USDC_ADDRESSES[chain], "USDC"
     return EVM_CHAINS[chain]["weth"], "wrapped native (no verified USDC on this chain)"

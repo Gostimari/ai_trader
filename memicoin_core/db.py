@@ -100,6 +100,14 @@ class Database:
                 cost_basis_usd REAL DEFAULT 0,
                 UNIQUE(chain, asset, contract)
             );
+            CREATE TABLE IF NOT EXISTS live_basis (
+                chain TEXT NOT NULL,
+                contract TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                cost_usd REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(chain, contract)
+            );
             CREATE TABLE IF NOT EXISTS pending_bridges (
                 id TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL,
@@ -113,6 +121,62 @@ class Database:
             """
         )
         self.conn.commit()
+
+    # ---------- live cost-basis ledger (real-mode P&L) ----------
+    def live_basis_add(self, chain: str, contract: str, qty: float,
+                       cost_usd: float) -> None:
+        """Record a bot buy: weighted-average cost upsert (quantity and cost
+        accumulate across buys of the same token)."""
+        if not contract or qty <= 0 or cost_usd < 0:
+            return
+        with _lock:
+            row = self.conn.execute(
+                "SELECT quantity, cost_usd FROM live_basis "
+                "WHERE chain=? AND contract=?", (chain, contract.lower())).fetchone()
+            if row and row["quantity"] > 0:
+                new_qty, new_cost = row["quantity"] + qty, row["cost_usd"] + cost_usd
+            else:
+                new_qty, new_cost = qty, cost_usd
+            self.conn.execute(
+                "INSERT INTO live_basis (chain, contract, quantity, cost_usd, updated_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(chain, contract) DO UPDATE SET "
+                "quantity=excluded.quantity, cost_usd=excluded.cost_usd, "
+                "updated_at=excluded.updated_at",
+                (chain, contract.lower(), new_qty, new_cost, utcnow()))
+            self.conn.commit()
+
+    def live_basis_reduce(self, chain: str, contract: str, qty: float) -> None:
+        """Record a bot sell: cost leaves proportionally to the quantity sold."""
+        if not contract or qty <= 0:
+            return
+        with _lock:
+            row = self.conn.execute(
+                "SELECT quantity, cost_usd FROM live_basis "
+                "WHERE chain=? AND contract=?", (chain, contract.lower())).fetchone()
+            if not row or row["quantity"] <= 0:
+                return
+            frac = min(1.0, qty / row["quantity"])
+            new_qty = max(0.0, row["quantity"] - qty)
+            new_cost = row["cost_usd"] * (1.0 - frac)
+            if new_qty <= 1e-12:
+                new_qty, new_cost = 0.0, 0.0
+            self.conn.execute(
+                "INSERT INTO live_basis (chain, contract, quantity, cost_usd, updated_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(chain, contract) DO UPDATE SET "
+                "quantity=excluded.quantity, cost_usd=excluded.cost_usd, "
+                "updated_at=excluded.updated_at",
+                (chain, contract.lower(), new_qty, new_cost, utcnow()))
+            self.conn.commit()
+
+    def live_basis_get(self, chain: str, contract: str) -> dict | None:
+        if not contract:
+            return None
+        row = self.conn.execute(
+            "SELECT quantity, cost_usd FROM live_basis "
+            "WHERE chain=? AND contract=?", (chain, contract.lower())).fetchone()
+        if not row or row["quantity"] <= 0:
+            return None
+        return {"quantity": row["quantity"], "cost_usd": row["cost_usd"]}
 
     # ---------- settings ----------
     def get_setting(self, key: str, default: Any = None) -> Any:

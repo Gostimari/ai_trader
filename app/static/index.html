@@ -10,7 +10,6 @@
 <header>
   <h1>AI Crypto Trader</h1>
   <div id="mode-badge" class="badge">DEMO WALLET</div>
-  <button id="mode-warn" class="notif-btn hidden" title="Active warnings" type="button">⚠️<span id="mode-warn-count" class="notif-count hidden"></span></button>
   <div class="header-spacer"></div>
   <button id="btn-bell" class="notif-btn" title="Notifications" type="button">🔔<span id="notif-count" class="notif-count hidden"></span></button>
   <div id="notif-panel" class="notif-panel hidden"></div>
@@ -88,7 +87,7 @@
       <code>MISTRAL_API_KEY</code> in the <code>.env</code> file.) Get a key at console.mistral.ai.</p>
     <form id="mistral-key-form">
       <label>Mistral API key
-        <input type="password" id="mistral-key" autocomplete="off" placeholder="paste key and save"></label>
+        <input type="password" id="mistral-key" autocomplete="new-password" placeholder="paste key and save"></label>
       <div id="mistral-key-status" class="hint"></div>
       <button type="submit">Save key (encrypted)</button>
     </form>
@@ -162,7 +161,7 @@
       </div>
       <div id="key-input-area" class="hidden">
         <label>Private key (EVM: hex with 0x · Solana: base58 or JSON byte array)
-          <input type="password" id="wallet-key" autocomplete="off"></label>
+          <input type="password" id="wallet-key" autocomplete="new-password"></label>
         <div class="hint">Note: seed phrases can't be used for Solana (non-standard derivation) — export its raw key from your wallet.</div>
       </div>
       <div id="wallet-status" class="hint"></div>
@@ -180,7 +179,7 @@
       Without a key, only Watchlist tokens are shown.</p>
     <form id="etherscan-key-form">
       <label>Etherscan API key (optional, free tier is enough)
-        <input type="password" id="etherscan-key" autocomplete="off" placeholder="paste key and save"></label>
+        <input type="password" id="etherscan-key" autocomplete="new-password" placeholder="paste key and save"></label>
       <div id="etherscan-key-status" class="hint"></div>
       <button type="submit">Save key (encrypted)</button>
     </form>

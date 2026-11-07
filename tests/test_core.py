@@ -391,8 +391,12 @@ class TestMarketRemovedFromUI:
         assert 'id="disclaimer"' not in html and 'class="disclaimer"' not in html
         assert 'id="setup-hint"' not in html and 'id="gas-warning"' not in html
         assert 'id="status-badges"' not in html
-        for el in ("btn-bell", "notif-count", "notif-panel", "mode-warn", "mode-warn-count"):
+        for el in ("btn-bell", "notif-count", "notif-panel"):
             assert f'id="{el}"' in html
+        # the old mode-warn icon is gone: the bell is the single
+        # notification surface (user request)
+        assert 'id="mode-warn"' not in html
+        assert 'id="mode-warn-count"' not in html
         js = open(os.path.join(os.path.dirname(__file__), "..", "app", "static", "app.js")).read()
         assert "function collectNotifications()" in js
         assert "function renderNotifications()" in js
@@ -832,8 +836,8 @@ class TestUserTestGaps:
         monkeypatch.setattr(oc, "read_wallet_balances",
                            lambda s, chains=None, extra_contracts=None: {
             "evm": {"address": "0xabc", "chains": {
-                "arc": {"native_symbol": "USDC", "native": 5.0,
-                        "tokens": [{"symbol": "CIRBTC", "contract": "0x171", "balance": 1.0}]}
+                "sepolia": {"native_symbol": "ETH", "native": 5.0,
+                            "tokens": [{"symbol": "TEST", "contract": "0x171", "balance": 1.0}]}
             }}, "solana": None})
         c = TestClient(srv.app)
         d = _liq_post_and_wait(c)
@@ -891,7 +895,8 @@ class TestStablecoinLiquidationAndKey:
         addr, label = stablecoin_target("base")
         assert addr == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" and label == "USDC"
         addr, label = stablecoin_target("arc")
-        assert label == "native USDC"
+        from memicoin_core.onchain import ARC_USDC
+        assert addr == ARC_USDC and label == "USDC"
         addr, label = stablecoin_target("binance-smart-chain")
         assert label == "wrapped native (no verified USDC on this chain)"
         assert SOLANA_USDC_MINT == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZ8nMYp7F"
@@ -2251,6 +2256,8 @@ class TestGasFeasibility:
             "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
         assert EVM_CHAINS["polygon"]["router"] == \
             "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"
+        assert EVM_CHAINS["arc"]["router"] == \
+            "0xB433a6F3c690D17E78aa3dD87eC01cdc304278a9"
         impostor = "0x4752ba5Dbc36f75D9E232F321687625204392e48"
         for chain, cfg in EVM_CHAINS.items():
             if cfg.get("router"):
@@ -4431,3 +4438,203 @@ class TestFreshTokenExpansion:
         assert m.note_asset(pair) == "FRESH"
         assert m.note_asset(pair) == "FRESH"
         assert len(m._cache["assets"]) == 1
+
+
+class TestSwapPathAndArcRouter:
+    """Regression: the quote built a direct [in, out] path while the swap
+    executed [in, weth, out] - meme tokens have no direct USDC pair, so the
+    quote reverted, the fallback price missed and every liquidation swap was
+    refused 'without slippage bound' (the Convert-all-to-USDC failure)."""
+
+    def _wallet(self, chain="base", weth="0x" + "aa" * 20):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = chain
+        w.cfg = {"chain_id": 8453, "router": "0x" + "bb" * 20, "weth": weth}
+        w._acct = None
+        return w
+
+    def test_swap_path_routes_through_weth(self):
+        w = self._wallet()
+        path = w._swap_path("0x" + "11" * 20, "0x" + "22" * 20)
+        assert path == ["0x" + "11" * 20, "0x" + "aa" * 20, "0x" + "22" * 20]
+
+    def test_swap_path_direct_when_endpoint_is_weth(self):
+        weth = "0x" + "aa" * 20
+        w = self._wallet(weth=weth)
+        assert w._swap_path(weth, "0x" + "22" * 20) == [weth, "0x" + "22" * 20]
+        assert w._swap_path("0x" + "11" * 20, weth) == ["0x" + "11" * 20, weth]
+
+    def test_swap_path_direct_on_arc(self):
+        w = self._wallet(chain="arc", weth=None)
+        assert w._swap_path("0x" + "11" * 20, "0x" + "22" * 20) == \
+            ["0x" + "11" * 20, "0x" + "22" * 20]
+
+    def test_quote_and_swap_share_the_same_path(self):
+        from unittest.mock import MagicMock
+        from memicoin_core.onchain import EVMWallet
+        weth = "0x" + "aa" * 20
+        w = self._wallet(weth=weth)
+        paths = {}
+        fns = MagicMock()
+
+        def get_amounts_out(amt, path):
+            paths["quote"] = list(path)
+            r = MagicMock()
+            r.call.return_value = [10 ** 18, 9 * 10 ** 17]
+            return r
+        fns.getAmountsOut.side_effect = get_amounts_out
+
+        def weth_call():
+            r = MagicMock()
+            r.call.return_value = bytes.fromhex(weth[2:])
+            return r
+        fns.WETH.side_effect = weth_call
+        contract = MagicMock()
+        contract.functions = fns
+        contract.encode_abi.side_effect = lambda name, args: (
+            paths.__setitem__("swap", list(args[2])), b"0xdata")[1]
+        w.w3 = MagicMock()
+        w.w3.eth.contract.return_value = contract
+        w.w3.eth.get_code.return_value = b"\x60\x80"
+        w.address = lambda: "0x" + "a" * 40
+        w._erc20_decimals = lambda t: 18
+        w._retry_on_rpc_failure = lambda f: f()
+        w.erc20_approve_if_needed = lambda *a, **k: None
+        w._base_tx = lambda to, data, value=0: {"to": to, "data": data}
+        w._send = lambda tx: "0xdeadbeef"
+        w.router_quote_min_out("0x" + "11" * 20, "0x" + "22" * 20, 1.0, 5.0)
+        r = w.swap_exact_tokens_for_tokens("0x" + "11" * 20, "0x" + "22" * 20,
+                                           1.0, min_amount_out=0.9)
+        assert r.ok
+        assert paths["quote"] == paths["swap"] == \
+            ["0x" + "11" * 20, weth, "0x" + "22" * 20]
+
+    def test_arc_swap_refuses_native_value_path(self):
+        from memicoin_core.onchain import EVMWallet
+        w = self._wallet(chain="arc", weth=None)
+        w.gas_balance = lambda: 1.0
+        w.gas_reserve = lambda: 0.0
+        r = w.swap_exact_eth_for_tokens("0x" + "22" * 20, 0.5, min_amount_out=1.0)
+        assert not r.ok and "wrapped-native" in r.error
+
+
+class TestArcBuyRouting:
+    def test_arc_buy_routes_through_usdc_token_swap(self, db, monkeypatch):
+        import memicoin_core.onchain as oc
+        from memicoin_core.onchain import ARC_USDC, TxResult
+        TYBG = "0x" + "cd" * 20
+        calls = {}
+
+        class _W:
+            def configured(self):
+                return True
+            def gas_ok(self):
+                return True, ""
+            def _weth(self):
+                return None
+            def swap_exact_tokens_for_tokens(self, tin, tout, amount,
+                                             min_amount_out=None):
+                calls.update(tin=tin, tout=tout, amount=amount, min=min_amount_out)
+                return TxResult(True, tx_id="0xarc")
+            def swap_exact_eth_for_tokens(self, *a, **k):
+                raise AssertionError("arc must not use the native-swap path")
+
+        monkeypatch.setattr(oc, "wallet_for", lambda chain, s: _W())
+        class _Sec:
+            def has(self, k):
+                return k == "onchain_private_key"
+            def get(self, k):
+                return "0x" + "11" * 32
+        c = Constraints(paper_trading=False, live_execution_mode="onchain")
+        engine = DecisionEngine(db, c, _FakeMarket(), None, onchain_secrets=_Sec())
+        action = {"type": "buy", "asset": TYBG, "_chain": "arc",
+                  "_price": 0.01, "amount": 5.0, "reason": "r"}
+        err = engine._execute_onchain("c1", action, "TYBG", 5.0, {})
+        assert err is None, err
+        assert calls["tin"] == ARC_USDC and calls["tout"] == TYBG
+        assert calls["amount"] == pytest.approx(5.0 * 0.01)
+        assert calls["min"] == pytest.approx(5.0 * 0.95)
+        # the live cost-basis ledger recorded the buy
+        b = db.live_basis_get("arc", TYBG)
+        assert b and b["quantity"] == pytest.approx(5.0)
+        assert b["cost_usd"] == pytest.approx(5.0 * 0.01)
+
+
+class TestLiveBasisLedger:
+    def test_add_is_weighted_average(self, db):
+        db.live_basis_add("base", "0x" + "ab" * 20, 10.0, 5.0)
+        db.live_basis_add("base", "0x" + "ab" * 20, 30.0, 9.0)
+        b = db.live_basis_get("base", "0x" + "ab" * 20)
+        assert b["quantity"] == pytest.approx(40.0)
+        assert b["cost_usd"] == pytest.approx(14.0)
+
+    def test_reduce_scales_cost_proportionally(self, db):
+        db.live_basis_add("base", "0x" + "ab" * 20, 10.0, 8.0)
+        db.live_basis_reduce("base", "0x" + "ab" * 20, 2.5)
+        b = db.live_basis_get("base", "0x" + "ab" * 20)
+        assert b["quantity"] == pytest.approx(7.5)
+        assert b["cost_usd"] == pytest.approx(6.0)
+
+    def test_reduce_to_zero_clears_entry(self, db):
+        db.live_basis_add("base", "0x" + "ab" * 20, 10.0, 8.0)
+        db.live_basis_reduce("base", "0x" + "ab" * 20, 10.0)
+        assert db.live_basis_get("base", "0x" + "ab" * 20) is None
+
+    def test_get_unknown_returns_none(self, db):
+        assert db.live_basis_get("base", "0x" + "ff" * 20) is None
+
+
+class TestRealWalletViewPnl:
+    def _client(self, db, monkeypatch):
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(srv, "db", db)
+        return TestClient(srv.app)
+
+    def test_token_pnl_from_live_basis(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        TYBG = "0x" + "ab" * 20
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        monkeypatch.setattr(oc, "build_extra_contracts", lambda s, m: {})
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None, extra_contracts=None:
+                            {"evm": {"address": "0xabc", "chains": {
+                                "base": {"native_symbol": "ETH", "native": 0.0, "tokens": [
+                                    {"symbol": "TYBG", "contract": TYBG, "balance": 1000.0}]}}},
+                            "solana": None, "error": None})
+        client = self._client(db, monkeypatch)
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses",
+                            lambda cs: {TYBG.lower(): 0.05})
+        monkeypatch.setattr(srv.market, "_ds_search", lambda q: [])
+        db.live_basis_add("base", TYBG, 1000.0, 40.0)
+        r = client.get("/api/wallet/balances").json()
+        row = next(rr for rr in r["chains"]["base"] if rr["symbol"] == "TYBG")
+        assert row["value_usd"] == pytest.approx(50.0)
+        assert row["pnl_usd"] == pytest.approx(10.0)
+        assert row["pnl_pct"] == pytest.approx(25.0)
+        assert r["total_pnl_usd"] == pytest.approx(10.0)
+
+    def test_untracked_token_has_no_pnl(self, db, monkeypatch):
+        import app.server as srv
+        import memicoin_core.onchain as oc
+        FRESH = "0x" + "cd" * 20
+        monkeypatch.setattr(srv.secrets, "has", lambda k: k == "onchain_private_key")
+        monkeypatch.setattr(oc, "build_extra_contracts", lambda s, m: {})
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None, extra_contracts=None:
+                            {"evm": {"address": "0xabc", "chains": {
+                                "base": {"native_symbol": "ETH", "native": 0.0, "tokens": [
+                                    {"symbol": "FRESH", "contract": FRESH, "balance": 5.0}]}}},
+                            "solana": None, "error": None})
+        client = self._client(db, monkeypatch)
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_prices_for_addresses",
+                            lambda cs: {FRESH.lower(): 1.0})
+        monkeypatch.setattr(srv.market, "_ds_search", lambda q: [])
+        r = client.get("/api/wallet/balances").json()
+        row = next(rr for rr in r["chains"]["base"] if rr["symbol"] == "FRESH")
+        assert row["value_usd"] == pytest.approx(5.0)
+        assert row["pnl_usd"] is None and row["pnl_pct"] is None

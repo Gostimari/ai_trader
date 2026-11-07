@@ -116,8 +116,6 @@ function renderNotifications() {
     el.classList.toggle("hidden", n === 0);
   };
   setBadge($("#notif-count"), items.length);
-  setBadge($("#mode-warn-count"), count);
-  $("#mode-warn")?.classList.toggle("hidden", count === 0);
   const panel = $("#notif-panel");
   if (!panel) return;
   panel.innerHTML = items.length
@@ -133,7 +131,6 @@ function notifControls() {
   if (!panel) return;
   const toggle = (ev) => { ev.stopPropagation(); panel.classList.toggle("hidden"); };
   $("#btn-bell")?.addEventListener("click", toggle);
-  $("#mode-warn")?.addEventListener("click", toggle);
   panel.addEventListener("click", (ev) => ev.stopPropagation());
   document.addEventListener("click", () => panel.classList.add("hidden"));
 }
@@ -414,12 +411,35 @@ function buildSeedInputs() {
     num.style.marginRight = "4px";
     const inp = document.createElement("input");
     inp.type = "password";
-    inp.autocomplete = "off";
+    inp.autocomplete = "new-password";
     inp.placeholder = "word";
+    const distribute = (text, start) => {
+      const words = text.trim().split(/\s+/).filter(Boolean);
+      let at = start;
+      for (const w of words) {
+        if (at >= fields.length) break;
+        fields[at].value = w;
+        fields[at].dispatchEvent(new Event("input"));
+        at++;
+      }
+      fields[Math.min(at, fields.length - 1)].focus();
+    };
     inp.addEventListener("input", () => {
+      if (/\s/.test(inp.value)) {
+        const words = inp.value.trim().split(/\s+/).filter(Boolean);
+        inp.value = words[0] || "";
+        for (let k = 1; k < words.length; k++) distribute(words[k], idx + k);
+      }
       chip.classList.toggle("filled", inp.value.trim().length > 0);
       const { n, ok } = seedCount();
       updateSeedHint(n, ok);
+    });
+    inp.addEventListener("paste", (e) => {
+      const text = e.clipboardData?.getData("text") || "";
+      if (/\s/.test(text.trim())) {
+        e.preventDefault();
+        distribute(text, idx);
+      }
     });
     inp.addEventListener("keydown", (e) => {
       if (e.key === " " || e.key === "Enter") {
@@ -628,6 +648,7 @@ async function pollCycles() {
     const isFirstLoad = lastSeenCycleId === null;
     lastSeenCycleId = cy.id;
     if (isFirstLoad) return; // don't notify for old cycles on page load
+    if (cy.status === "emergency") return; // liquidation posts its own notification
     const ok = cy.status === "completed";
     const msg = ok
       ? `Decision cycle finished: ${cy.analysis_summary || "see Decision Feed"}`

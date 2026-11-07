@@ -1122,7 +1122,7 @@ class DecisionEngine:
 
     def _swap_onchain(self, cycle_id, action, asset, amount, token, chain,
                       prices):
-        from .onchain import EVM_CHAINS, wallet_for
+        from .onchain import ARC_USDC, EVM_CHAINS, wallet_for
         wallet = wallet_for(chain, self._onchain_secrets)
         if not wallet.configured():
             return f"on-chain mode selected but no {chain} private key imported"
@@ -1134,21 +1134,30 @@ class DecisionEngine:
         # slippage bound: every real swap carries an explicit amountOutMin
         # computed from market prices (never the router's default of 1)
         slip = self.constraints.onchain_slippage_pct / 100.0
+        basis_buy = basis_sell = basis_move = None
         if action["type"] == "buy":
             token_price = self._token_price(action, asset, token, prices)
             if token_price <= 0:
                 return f"no reliable price for {asset}: refusing on-chain buy"
             usd_budget = amount * token_price
             if chain in EVM_CHAINS:
-                native_price = self._native_price(chain, prices)
-                if native_price <= 0:
-                    return (f"no reliable price for the {chain} gas token: "
-                            f"refusing on-chain buy")
-                # amount is a token QUANTITY (shared resolver contract); the
-                # router needs the native-token budget that buys it
-                native_qty = usd_budget / native_price
-                res = wallet.swap_exact_eth_for_tokens(
-                    token, native_qty, min_amount_out=amount * (1 - slip))
+                weth = wallet._weth()
+                if weth:
+                    native_price = self._native_price(chain, prices)
+                    if native_price <= 0:
+                        return (f"no reliable price for the {chain} gas token: "
+                                f"refusing on-chain buy")
+                    # amount is a token QUANTITY (shared resolver contract); the
+                    # router needs the native-token budget that buys it
+                    native_qty = usd_budget / native_price
+                    res = wallet.swap_exact_eth_for_tokens(
+                        token, native_qty, min_amount_out=amount * (1 - slip))
+                else:
+                    # Arc: USDC is the native gas token; ArcSwap pairs
+                    # token<->USDC directly (the router takes no native value)
+                    res = wallet.swap_exact_tokens_for_tokens(
+                        ARC_USDC, token, usd_budget,
+                        min_amount_out=amount * (1 - slip))
             else:
                 sol_price = self._native_price(chain, prices)
                 if sol_price <= 0:
@@ -1157,6 +1166,7 @@ class DecisionEngine:
                 res = wallet.swap(self._native_mint(chain), token,
                                   usd_budget / sol_price,
                                   slippage_bps=int(self.constraints.onchain_slippage_pct * 100))
+            basis_buy = (chain, token, amount, usd_budget)
         else:
             dest = action.get("asset_out") or ("native" if chain in EVM_CHAINS else self._native_mint(chain))
             if action["type"] == "swap" and dest and self._looks_like_address(dest):
@@ -1167,23 +1177,30 @@ class DecisionEngine:
                                 f"on-chain swap without slippage protection")
                     res = wallet.swap_exact_tokens_for_tokens(token, dest, amount,
                                                               min_amount_out=min_out)
+                    basis_move = (chain, token, amount, dest, min_out)
                 else:
                     res = wallet.swap(token, dest, amount,
                                       slippage_bps=int(self.constraints.onchain_slippage_pct * 100))
+                    basis_sell = (chain, token, amount)
             else:
                 if chain in EVM_CHAINS:
-                    weth = wallet._weth() or ""
+                    weth = wallet._weth()
+                    if not weth and chain == "arc":
+                        weth = ARC_USDC
                     min_out = self._min_out_for(action, asset, token, weth, amount, prices, slip)
                     if min_out is None:
                         return (f"no reliable price for {weth or 'the gas token'}: "
                                 f"refusing on-chain sell without slippage protection")
                     res = wallet.swap_exact_tokens_for_tokens(token, weth, amount,
                                                               min_amount_out=min_out)
+                    basis_sell = (chain, token, amount)
                 else:
                     res = wallet.swap(token, self._native_mint(chain), amount,
                                       slippage_bps=int(self.constraints.onchain_slippage_pct * 100))
+                    basis_sell = (chain, token, amount)
         if not res.ok:
             return res.error
+        self._record_live_basis(basis_buy, basis_sell, basis_move)
         self.db.add_decision({
             "cycle_id": cycle_id, "action": action["type"], "asset_in": asset,
             "asset_out": action.get("asset_out") or "native",
@@ -1191,6 +1208,29 @@ class DecisionEngine:
             "reason": action["reason"], "tx_id": res.tx_id,
         })
         return None
+
+    def _record_live_basis(self, basis_buy, basis_sell, basis_move) -> None:
+        """Live cost-basis ledger: real-mode P&L needs a per-token cost
+        tracked as the bot trades. Quantities come from the pinned action
+        amounts and the slippage-adjusted estimates - slippage makes them
+        approximations of the on-chain fills, so the ledger records intent,
+        not exact fills."""
+        try:
+            if basis_buy:
+                chain, token, qty, cost = basis_buy
+                self.db.live_basis_add(chain, token, qty, cost)
+            if basis_sell:
+                chain, token, qty = basis_sell
+                self.db.live_basis_reduce(chain, token, qty)
+            if basis_move:
+                chain, src, qty_in, dest, qty_out = basis_move
+                row = self.db.live_basis_get(chain, src)
+                if row and row["quantity"] > 0:
+                    cost_out = row["cost_usd"] * min(1.0, qty_in / row["quantity"])
+                    self.db.live_basis_add(chain, dest, qty_out, cost_out)
+                self.db.live_basis_reduce(chain, src, qty_in)
+        except Exception:
+            log.exception("live cost-basis ledger update failed")
 
     def _token_price(self, action: dict, asset: str, token: str,
                      prices: dict[str, float]) -> float:

@@ -435,6 +435,27 @@ def wallet_balances():
                          "value_usd": 0.0, "chain": "solana", "kind": "token",
                          "contract": t.get("contract", t.get("address", ""))})
         chains["solana"] = rows
+    # live cost-basis ledger: per-token P&L for positions the BOT bought
+    # on-chain (chain reads alone can't know what was paid). Balances that
+    # drifted from the ledger (manual transfers) scale the cost proportionally.
+    total_basis = 0.0
+    for chain, chain_rows in chains.items():
+        for r in chain_rows:
+            r.setdefault("pnl_usd", None)
+            r.setdefault("pnl_pct", None)
+            if r.get("kind") != "token" or not r.get("contract"):
+                continue
+            b = db.live_basis_get(chain, r["contract"])
+            if not b or b["quantity"] <= 0:
+                continue
+            frac = min(1.0, r["balance"] / b["quantity"])
+            basis = b["cost_usd"] * frac
+            if basis > 0:
+                r["cost_basis_usd"] = basis
+                r["pnl_usd"] = r["value_usd"] - basis
+                r["pnl_pct"] = (r["value_usd"] - basis) / basis * 100
+                total_basis += basis
+
     # gas health + warning levels per chain
     # healthy: full reserve intact | low: < 2 swaps of headroom
     # critical: < 1 swap left | empty: cannot transact at all
@@ -495,6 +516,8 @@ def wallet_balances():
             "solana_address": (sol or {}).get("address"),
             "chains": chains, "total_usd": total,
             "gas": gas_health, "gas_warnings": warnings,
+            "total_cost_basis_usd": total_basis,
+            "total_pnl_usd": total - total_basis if total_basis > 0 else None,
             "priced": bool(prices), "error": raw.get("error")}
 
 
@@ -754,124 +777,6 @@ def _liquidation_body(c, cycle_id: int) -> None:
     """Sell everything to stablecoins. Runs in a background thread (the
     endpoint returns immediately so the UI can poll for live progress);
     trading is halted before the first token is sold."""
-    from memicoin_core.onchain import (EVM_CHAINS, SolanaWallet, EVMWallet,
-                                       SOLANA_USDC_MINT, read_wallet_balances,
-                                       stablecoin_target)
-    if c.paper_trading:
-        try:
-            prices = market.get_prices()
-        except MarketDataError as e:
-            raise HTTPException(503, f"Cannot liquidate: market data unavailable ({e})")
-        db.finish_cycle(cycle_id, "emergency", "", "", summary="Emergency convert to cash")
-        for p in db.get_positions():
-            qty = p["quantity"]
-            price = prices.get(p["asset"], 0.0)
-            proceeds = qty * price
-            pnl = tracker.apply_sell(p["asset"], qty, proceeds)
-            row = {
-                "cycle_id": cycle_id, "action": "sell", "asset_in": p["asset"],
-                "asset_out": "USD", "amount": qty, "value_usd": proceeds,
-                "pnl_per_trade": pnl, "status": "executed",
-                "reason": "Emergency stop: converted to stablecoin/cash.",
-                "tx_id": f"paper-emergency-{p['asset']}",
-            }
-            db.add_decision(row)
-            _liq_add({"chain": "paper", "symbol": p["asset"], "ok": True,
-                      "target": "USD", "tx_id": row["tx_id"], "error": ""})
-        _liq_finish(True)
-        return
-
-    if c.live_execution_mode == "demo":
-        from memicoin_core.demowallet import DemoWallet, NATIVE_WRAPPED
-        try:
-            prices = market.get_prices()
-        except MarketDataError as e:
-            db.finish_cycle(cycle_id, "emergency", "", "",
-                            summary=f"Liquidation aborted: market data unavailable ({e})")
-            _liq_finish(False, f"market data unavailable: {e}")
-            return
-        demo = DemoWallet(db)
-        for r in demo.rows():
-            if r["balance"] <= 0 or r["asset"] == "USDC":
-                continue
-            chain = r["chain"]
-            price = prices.get(r["asset"].upper(), 0.0)
-            if price <= 0 and r["is_gas"]:
-                if chain == "arc":
-                    price = 1.0
-                else:
-                    w = NATIVE_WRAPPED.get(chain)
-                    if w:
-                        try:
-                            price = market.get_prices_for_addresses([w]).get(w.lower(), 0.0)
-                        except Exception:
-                            price = 0.0
-            if price <= 0:
-                _liq_add({"chain": chain, "symbol": r["asset"], "ok": False,
-                          "target": "USDC",
-                          "error": "no price available - liquidate manually in Settings 3c"})
-                continue
-            amount = r["balance"]
-            if r["is_gas"]:
-                amount = r["balance"] - demo.per_tx_gas(chain)
-                if amount <= 0:
-                    _liq_add({"chain": chain, "symbol": r["asset"], "ok": False,
-                              "target": "USDC",
-                              "error": "gas balance too small to cover the swap gas itself"})
-                    continue
-            ok, msg = demo.swap(chain, r["asset"], r["contract"], "USDC", "",
-                                amount, price, 1.0)
-            _liq_add({"chain": chain, "symbol": r["asset"], "ok": ok,
-                      "target": "USDC", "error": "" if ok else msg})
-        db.finish_cycle(cycle_id, "emergency", "", "",
-                        summary="Emergency liquidation to stablecoins (demo mode)")
-        _liq_finish(all(r["ok"] for r in _LIQ["results"]) if _LIQ["results"] else True)
-        return
-
-    from memicoin_core.onchain import (EVM_CHAINS, SolanaWallet, EVMWallet,
-                                       SOLANA_USDC_MINT, read_wallet_balances,
-                                       stablecoin_target)
-    raw = read_wallet_balances(secrets)
-    evm = (raw.get("evm") or {}).get("chains") or {}
-    for chain, entry in evm.items():
-        target_addr, target_label = stablecoin_target(chain)
-        if chain in EVM_CHAINS and EVM_CHAINS[chain].get("router"):
-            w = EVMWallet(secrets, chain)
-            for t in entry.get("tokens", []):
-                try:
-                    min_out = w.router_quote_min_out(
-                        t["contract"], target_addr, t["balance"],
-                        c.onchain_slippage_pct)
-                except Exception:
-                    price = prices.get((t["symbol"] or "").upper(), 0.0)
-                    min_out = (t["balance"] * price
-                               * (1.0 - c.onchain_slippage_pct / 100.0)) if price > 0 else None
-                res = w.swap_exact_tokens_for_tokens(t["contract"], target_addr,
-                                                     t["balance"],
-                                                     min_amount_out=min_out)
-                _liq_add({"chain": chain, "symbol": t["symbol"], "ok": res.ok,
-                          "tx_id": res.tx_id, "target": target_label,
-                          "error": res.error})
-        else:
-            for t in entry.get("tokens", []):
-                _liq_add({"chain": chain, "symbol": t["symbol"], "ok": False,
-                          "target": target_label,
-                          "error": "no DEX router on this chain \u2014 cannot liquidate automatically"})
-    sol = raw.get("solana")
-    if sol and sol.get("tokens"):
-        sw = SolanaWallet(secrets)
-        for t in sol.get("tokens", []):
-            res = sw.swap(t.get("contract", t.get("mint", "")), SOLANA_USDC_MINT,
-                          t.get("balance", 0.0))
-            _liq_add({"chain": "solana", "symbol": t.get("symbol", "?"), "ok": res.ok,
-                      "tx_id": res.tx_id, "target": "USDC", "error": res.error})
-    db.finish_cycle(cycle_id, "emergency", "", "",
-                    summary="Emergency liquidation to stablecoins (real mode)")
-    _liq_finish(all(r["ok"] for r in _LIQ["results"]) if _LIQ["results"] else True)
-def _liquidation_body(c, cycle_id: int) -> None:
-    """Sell everything to stablecoins. Runs in a background thread (the
-    endpoint returns immediately so the UI can poll for live progress);
-    trading is halted before the first token is sold."""
     if c.paper_trading:
         try:
             prices = market.get_prices()
@@ -946,6 +851,10 @@ def _liquidation_body(c, cycle_id: int) -> None:
     from memicoin_core.onchain import (EVM_CHAINS, SolanaWallet, EVMWallet,
                                        SOLANA_USDC_MINT, read_wallet_balances,
                                        stablecoin_target)
+    try:
+        prices = market.get_prices()
+    except MarketDataError:
+        prices = {}
     raw = read_wallet_balances(secrets)
     evm = (raw.get("evm") or {}).get("chains") or {}
     for chain, entry in evm.items():
