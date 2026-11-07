@@ -34,7 +34,7 @@ EVM_CHAINS = {
         "rpc": "https://mainnet.base.org",
         "rpc_fallbacks": ["https://base-rpc.publicnode.com",
                           "https://base.drpc.org"],
-        "router": "0x4752ba5Dbc23f44D87826276BF6Fd6b1C372aD24",  # Uniswap V2 Router02 on Base
+        "router": "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",  # Uniswap V2 Router02 on Base
         "weth": "0x4200000000000000000000000000000000000006",
         "explorer": "https://basescan.org/tx/",
     },
@@ -99,6 +99,14 @@ SOLANA = {
 SUPPORTED_CHAINS = list(EVM_CHAINS) + ["solana"]
 # TON is intentionally NOT in this list: the swap path cannot be safely
 # tested from this environment, so we ship an explicit disabled status.
+
+
+def _checksum(addr: str) -> str:
+    """EIP-55 checksum that tolerates ANY input casing. web3's
+    to_checksum_address raises on wrong casing; addresses reach us from
+    constants, env vars and AI-provided contracts, so normalize first."""
+    from web3 import Web3
+    return Web3.to_checksum_address(addr.lower())
 
 
 @dataclass
@@ -182,7 +190,7 @@ class EVMWallet:
                 "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}],
                 "type": "function"}]
         contract = self.w3.eth.contract(
-            address=self.w3.to_checksum_address(token), abi=abi)
+            address=_checksum(token), abi=abi)
         raw = self._retry_on_rpc_failure(
             lambda: contract.functions.balanceOf(self.address()).call())
         decimals = self._erc20_decimals(token)
@@ -192,7 +200,7 @@ class EVMWallet:
         abi = [{"constant": True, "inputs": [], "name": "decimals",
                 "outputs": [{"name": "", "type": "uint8"}], "type": "function"}]
         contract = self.w3.eth.contract(
-            address=self.w3.to_checksum_address(token), abi=abi)
+            address=_checksum(token), abi=abi)
         return int(self._retry_on_rpc_failure(
             lambda: contract.functions.decimals().call()))
 
@@ -283,7 +291,7 @@ class EVMWallet:
             {"from": addr, "to": to, "data": data, "value": value_wei}))
         return {
             "from": addr,
-            "to": self.w3.to_checksum_address(to),
+            "to": _checksum(to),
             "data": data,
             "value": value_wei,
             "nonce": nonce,
@@ -302,7 +310,7 @@ class EVMWallet:
                            {"name": "_value", "type": "uint256"}],
                 "name": "approve", "outputs": [{"name": "", "type": "bool"}],
                 "type": "function"}]
-        token_c = self.w3.eth.contract(address=self.w3.to_checksum_address(token), abi=abi)
+        token_c = self.w3.eth.contract(address=_checksum(token), abi=abi)
         current = self._retry_on_rpc_failure(
             lambda: token_c.functions.allowance(self.address(), router).call())
         if current < amount_raw:
@@ -324,9 +332,9 @@ class EVMWallet:
                 "outputs": [{"name": "", "type": "uint256[]"}],
                 "type": "function"}]
         dec_in = self._erc20_decimals(token_in)
-        path = [self.w3.to_checksum_address(token_in),
-                self.w3.to_checksum_address(token_out)]
-        c = self.w3.eth.contract(address=self.w3.to_checksum_address(router), abi=abi)
+        path = [_checksum(token_in),
+                _checksum(token_out)]
+        c = self.w3.eth.contract(address=_checksum(router), abi=abi)
         amounts = self._retry_on_rpc_failure(
             lambda: c.functions.getAmountsOut(
                 int(amount_in * 10 ** dec_in), path).call())
@@ -365,11 +373,11 @@ class EVMWallet:
                     "type": "function"}]
             import time
             deadline = int(time.time()) + 1200
-            path = [self.w3.to_checksum_address(token_in),
+            path = [_checksum(token_in),
                     self.cfg["weth"],
-                    self.w3.to_checksum_address(token_out)]
+                    _checksum(token_out)]
             router_c = self.w3.eth.contract(
-                address=self.w3.to_checksum_address(router), abi=abi)
+                address=_checksum(router), abi=abi)
             data = router_c.encode_abi(
                 "swapExactTokensForTokens",
                 args=[raw_in, raw_min, path, self.address(), deadline])
@@ -386,7 +394,7 @@ class EVMWallet:
         funds are unrecoverable. Verified on-chain: the router must hold code
         AND report the configured wrapped-native token via WETH()."""
         code = self._retry_on_rpc_failure(
-            lambda: self.w3.eth.get_code(self.w3.to_checksum_address(router)))
+            lambda: self.w3.eth.get_code(_checksum(router)))
         if not code:
             raise RuntimeError(
                 f"router safety check failed on {self.chain}: {router} holds "
@@ -396,7 +404,7 @@ class EVMWallet:
             abi = [{"constant": True, "inputs": [], "name": "WETH",
                     "outputs": [{"name": "", "type": "address"}],
                     "type": "function"}]
-            c = self.w3.eth.contract(address=self.w3.to_checksum_address(router),
+            c = self.w3.eth.contract(address=_checksum(router),
                                      abi=abi)
             reported = self._retry_on_rpc_failure(lambda: c.functions.WETH().call())
             if isinstance(reported, (bytes, bytearray)):
@@ -463,9 +471,9 @@ class EVMWallet:
                     "type": "function"}]
             import time
             deadline = int(time.time()) + 1200
-            path = [self.w3.to_checksum_address(weth), self.w3.to_checksum_address(token_out)]
+            path = [_checksum(weth), _checksum(token_out)]
             router_c = self.w3.eth.contract(
-                address=self.w3.to_checksum_address(router), abi=abi)
+                address=_checksum(router), abi=abi)
             data = router_c.encode_abi("swapExactETHForTokens",
                                        args=[raw_min, path, self.address(), deadline])
             value_wei = self.w3.to_wei(eth_amount, "ether")

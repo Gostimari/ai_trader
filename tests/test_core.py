@@ -2183,14 +2183,29 @@ class TestGasFeasibility:
     def test_chain_router_and_weth_addresses_are_checksum_valid(self):
         # regression: the base/polygon router constants carried invalid
         # EIP-55 checksums, crashing EVERY swap on those chains with
-        # "Address has an invalid EIP-55 checksum"
+        # "Address has an invalid EIP-55 checksum". to_checksum_address()
+        # only NORMALIZES (it accepts bad casing), so the original test
+        # could not catch this - validation requires is_checksum_address().
         from web3 import Web3
         from memicoin_core.onchain import EVM_CHAINS
         for chain, cfg in EVM_CHAINS.items():
             for key in ("router", "weth"):
                 addr = cfg.get(key)
                 if addr:
-                    Web3.to_checksum_address(addr)
+                    assert Web3.is_checksum_address(addr), (chain, key, addr)
+
+    def test_checksum_helper_tolerates_any_casing(self):
+        # regression: a wrong-cased router constant crashed every swap with
+        # "Address has an invalid EIP-55 checksum"; _checksum() must accept
+        # any casing and always return the canonical EIP-55 form
+        from memicoin_core.onchain import _checksum
+        from web3 import Web3
+        for raw in ("0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24",
+                    "0x4752ba5Dbc23f44D87826276BF6Fd6b1C372aD24",
+                    "0X4752BA5DBC23F44D87826276BF6FD6B1C372AD24"):
+            out = _checksum(raw)
+            assert Web3.is_checksum_address(out)
+        assert _checksum("0x" + "ab" * 20) == Web3.to_checksum_address("0x" + "ab" * 20)
 
     def test_router_constants_are_verified_live_addresses(self):
         # regression: the old base router constant 0x4752ba5...392e48 was a
@@ -2199,7 +2214,7 @@ class TestGasFeasibility:
         # unrecoverable. Pin the verified-live addresses exactly.
         from memicoin_core.onchain import EVM_CHAINS
         assert EVM_CHAINS["base"]["router"] == \
-            "0x4752ba5Dbc23f44D87826276BF6Fd6b1C372aD24"
+            "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
         assert EVM_CHAINS["polygon"]["router"] == \
             "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506"
         impostor = "0x4752ba5Dbc36f75D9E232F321687625204392e48"
