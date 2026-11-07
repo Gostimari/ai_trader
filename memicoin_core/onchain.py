@@ -317,6 +317,23 @@ class EVMWallet:
         if current < amount_raw:
             data = token_c.encode_abi("approve", args=[router, 2 ** 256 - 1])
             self._send(self._base_tx(token, data))
+            # the receipt confirms the approve on ONE node - public RPCs are
+            # load-balanced and a lagging node can serve the very next swap
+            # with the OLD allowance (observed live: a BRETT swap reverted
+            # TRANSFER_FROM_FAILED right after its max approve was mined).
+            # Re-read until the approval is visible before spending gas.
+            import time
+            for _ in range(5):
+                current = self._retry_on_rpc_failure(
+                    lambda: token_c.functions.allowance(
+                        self.address(), router).call())
+                if current >= amount_raw:
+                    return
+                time.sleep(1)
+            raise RuntimeError(
+                f"approve for {token} was mined but the allowance still reads "
+                f"below the swap amount - RPC state lag, refusing to send the "
+                f"swap into a stale node")
 
     def _swap_path(self, token_in: str, token_out: str) -> list[str]:
         """Hop list shared by quotes AND swaps - the two must always agree,

@@ -4752,3 +4752,59 @@ class TestRealWalletViewPnl:
         row = next(rr for rr in r["chains"]["base"] if rr["symbol"] == "FRESH")
         assert row["value_usd"] == pytest.approx(5.0)
         assert row["pnl_usd"] is None and row["pnl_pct"] is None
+
+
+class TestApproveAllowanceRace:
+    """Regression: the swap was sent immediately after the approve receipt -
+    public RPCs are load-balanced and a lagging node served the very next
+    swap with the OLD allowance (a BRETT swap reverted TRANSFER_FROM_FAILED
+    seconds after its max approve was mined). The approval must be re-read
+    until it is visible before the swap is sent."""
+
+    def _wallet(self):
+        from memicoin_core.onchain import EVMWallet
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "base"
+        w.cfg = {"chain_id": 8453, "router": "0x" + "bb" * 20,
+                 "weth": "0x" + "aa" * 20}
+        w._acct = None
+        return w
+
+    def test_swap_waits_until_approval_is_visible(self, monkeypatch):
+        from unittest.mock import MagicMock
+        from memicoin_core.onchain import EVMWallet
+        w = self._wallet()
+        reads = [0, 0, 2 ** 256 - 1]
+        sent = []
+        erc = MagicMock()
+        erc.functions.allowance.return_value.call.side_effect = \
+            lambda: reads.pop(0)
+        erc.encode_abi.return_value = b"0xapprove"
+        w.w3 = MagicMock()
+        w.w3.eth.contract.return_value = erc
+        w.address = lambda: "0x" + "a" * 40
+        w._base_tx = lambda to, data, value=0: {"to": to, "data": data}
+        w._send = lambda tx: (sent.append(tx), "0xapprove")[-1]
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        w.erc20_approve_if_needed("0x" + "dd" * 20, "0x" + "bb" * 20, 10 ** 18)
+        assert len(sent) == 1 and not reads
+
+    def test_refuses_swap_when_approval_never_becomes_visible(self, monkeypatch):
+        from unittest.mock import MagicMock
+        from memicoin_core.onchain import EVMWallet
+        w = self._wallet()
+        reads = [0] * 6
+        erc = MagicMock()
+        erc.functions.allowance.return_value.call.side_effect = \
+            lambda: reads.pop(0)
+        w.w3 = MagicMock()
+        w.w3.eth.contract.return_value = erc
+        w.address = lambda: "0x" + "a" * 40
+        w._base_tx = lambda to, data, value=0: {}
+        w._send = lambda tx: "0xapprove"
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        try:
+            w.erc20_approve_if_needed("0x" + "dd" * 20, "0x" + "bb" * 20, 10 ** 18)
+            raise AssertionError("should have raised")
+        except RuntimeError as e:
+            assert "RPC state lag" in str(e)
