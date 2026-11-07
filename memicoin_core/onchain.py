@@ -28,6 +28,7 @@ EVM_CHAINS = {
         "router": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",  # Uniswap V2
         "weth": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         "explorer": "https://etherscan.io/tx/",
+        "native_symbol": "ETH",
     },
     "base": {
         "chain_id": 8453,
@@ -37,6 +38,7 @@ EVM_CHAINS = {
         "router": "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",  # Uniswap V2 Router02 on Base
         "weth": "0x4200000000000000000000000000000000000006",
         "explorer": "https://basescan.org/tx/",
+        "native_symbol": "ETH",
     },
     "polygon": {
         "chain_id": 137,
@@ -45,6 +47,7 @@ EVM_CHAINS = {
         "router": "0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506",  # SushiSwap V2 (UniV2 ABI)
         "weth": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
         "explorer": "https://polygonscan.com/tx/",
+        "native_symbol": "POL",
     },
     "binance-smart-chain": {
         "chain_id": 56,
@@ -53,6 +56,7 @@ EVM_CHAINS = {
         "router": "0x10ED43C718714eb63d5aA57B78B54704E256024E",  # PancakeSwap V2
         "weth": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
         "explorer": "https://bscscan.com/tx/",
+        "native_symbol": "BNB",
     },
     # Arc by Circle (docs.arc.io): EVM-compatible, chain ID 5042, USDC is the
     # native gas token (18 decimals). DEX: ArcSwap, a Uniswap-V2 fork verified
@@ -79,6 +83,7 @@ EVM_CHAINS = {
         "router": None,
         "weth": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
         "explorer": "https://sepolia.etherscan.io/tx/",
+        "native_symbol": "ETH",
         "testnet": True,
     },
     "base-sepolia": {
@@ -88,6 +93,7 @@ EVM_CHAINS = {
         "router": None,
         "weth": "0x4200000000000000000000000000000000000006",
         "explorer": "https://sepolia.basescan.org/tx/",
+        "native_symbol": "ETH",
         "testnet": True,
     },
 }
@@ -196,6 +202,20 @@ class EVMWallet:
             lambda: contract.functions.balanceOf(self.address()).call())
         decimals = self._erc20_decimals(token)
         return float(raw) / (10 ** decimals)
+
+    def erc20_raw_balance(self, token: str) -> int:
+        """Integer balanceOf. The float round-trip through erc20_balance can
+        land ABOVE the true balance when converted back to integer (observed
+        live: int(37.67070443783452 * 1e18) exceeded the wallet's real BRETT
+        balance by 1425 wei, so transferFrom reverted TRANSFER_FROM_FAILED
+        even with a MAX allowance). Swaps must never spend more than this."""
+        abi = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}],
+                "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}],
+                "type": "function"}]
+        contract = self.w3.eth.contract(
+            address=_checksum(token), abi=abi)
+        return int(self._retry_on_rpc_failure(
+            lambda: contract.functions.balanceOf(self.address()).call()))
 
     def _erc20_decimals(self, token: str) -> int:
         abi = [{"constant": True, "inputs": [], "name": "decimals",
@@ -353,10 +373,15 @@ class EVMWallet:
         return [tin, w, tout]
 
     def router_quote_min_out(self, token_in: str, token_out: str,
-                             amount_in: float, slippage_pct: float) -> float:
+                             amount_in: float, slippage_pct: float,
+                             cap_to_balance: bool = True) -> float:
         """On-chain quote (router getAmountsOut) for a token->token swap,
-        lowered by the slippage tolerance. Raises when the router has no
-        direct pair for the path; callers fall back to market prices."""
+        lowered by the slippage tolerance. The quoted amount is capped at the
+        on-chain balance so quote and swap always agree. cap_to_balance=False
+        quotes a NATIVE amount (swapExactETHForTokens sends value with the
+        tx; the wallet holds no wrapped-native tokens to cap against).
+        Raises when the router has no direct pair for the path; callers fall
+        back to market prices. Returns 0.0 when the input is dust."""
         router = self._router()
         if not router:
             raise RuntimeError(self._no_router_error())
@@ -369,9 +394,13 @@ class EVMWallet:
         dec_in = self._erc20_decimals(token_in)
         path = self._swap_path(token_in, token_out)
         c = self.w3.eth.contract(address=_checksum(router), abi=abi)
+        raw_in = int(amount_in * 10 ** dec_in)
+        if cap_to_balance:
+            raw_in = min(raw_in, self.erc20_raw_balance(token_in))
+        if raw_in <= 0:
+            return 0.0
         amounts = self._retry_on_rpc_failure(
-            lambda: c.functions.getAmountsOut(
-                int(amount_in * 10 ** dec_in), path).call())
+            lambda: c.functions.getAmountsOut(raw_in, path).call())
         dec_out = self._erc20_decimals(token_out)
         expected = amounts[-1] / 10 ** dec_out
         return expected * (1.0 - slippage_pct / 100.0)
@@ -392,7 +421,12 @@ class EVMWallet:
                     "min_amount_out computed from market prices"))
             self.verify_router(router)
             dec_in = self._erc20_decimals(token_in)
-            raw_in = int(amount_in * 10 ** dec_in)
+            raw_in = min(int(amount_in * 10 ** dec_in),
+                         self.erc20_raw_balance(token_in))
+            if raw_in <= 0:
+                return TxResult(False, error=(
+                    f"on-chain balance of {token_in} is zero or dust - "
+                    f"nothing to swap"))
             self.erc20_approve_if_needed(token_in, router, raw_in)
             dec_out = self._erc20_decimals(token_out)
             raw_min = max(1, int(min_amount_out * 10 ** dec_out))

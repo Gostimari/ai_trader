@@ -868,6 +868,11 @@ def _liquidation_body(c, cycle_id: int) -> None:
         if chain in EVM_CHAINS and EVM_CHAINS[chain].get("router"):
             w = EVMWallet(secrets, chain)
             for t in entry.get("tokens", []):
+                if t["contract"].lower() == target_addr.lower():
+                    _liq_add({"chain": chain, "symbol": t["symbol"],
+                              "ok": True, "target": target_label,
+                              "error": "already the stablecoin target - nothing to swap"})
+                    continue
                 try:
                     min_out = w.router_quote_min_out(
                         t["contract"], target_addr, t["balance"],
@@ -876,12 +881,51 @@ def _liquidation_body(c, cycle_id: int) -> None:
                     price = prices.get((t["symbol"] or "").upper(), 0.0)
                     min_out = (t["balance"] * price
                                * (1.0 - c.onchain_slippage_pct / 100.0)) if price > 0 else None
+                if min_out is not None and (
+                        min_out <= 0
+                        or (target_label == "USDC" and min_out < 0.01)):
+                    _liq_add({"chain": chain, "symbol": t["symbol"],
+                              "ok": True, "target": target_label,
+                              "error": "dust balance - below the DEX swap minimum, skipped"})
+                    continue
                 res = w.swap_exact_tokens_for_tokens(t["contract"], target_addr,
                                                      t["balance"],
                                                      min_amount_out=min_out)
                 _liq_add({"chain": chain, "symbol": t["symbol"], "ok": res.ok,
                           "tx_id": res.tx_id, "target": target_label,
                           "error": res.error})
+            # native gas token: convert everything above the gas reserve too
+            # (the demo branch already liquidates gas tokens; real mode used
+            # to silently skip the wallet's largest asset)
+            weth = EVM_CHAINS[chain].get("weth")
+            if weth:
+                try:
+                    nat_amt = w.investable_native()
+                except Exception:
+                    nat_amt = 0.0
+                if nat_amt > 0:
+                    try:
+                        nat_min = w.router_quote_min_out(
+                            weth, target_addr, nat_amt,
+                            c.onchain_slippage_pct, cap_to_balance=False)
+                    except Exception:
+                        nat_price = prices.get(
+                            EVM_CHAINS[chain].get("native_symbol", ""), 0.0)
+                        nat_min = (nat_amt * nat_price
+                                   * (1.0 - c.onchain_slippage_pct / 100.0)
+                                   ) if nat_price > 0 else None
+                    if nat_min is None:
+                        _liq_add({"chain": chain,
+                                  "symbol": EVM_CHAINS[chain].get("native_symbol", "NATIVE"),
+                                  "ok": False, "target": target_label,
+                                  "error": "could not quote a slippage bound for the native token"})
+                    elif nat_min > 0 and not (target_label == "USDC" and nat_min < 0.01):
+                        res = w.swap_exact_eth_for_tokens(
+                            target_addr, nat_amt, min_amount_out=nat_min)
+                        _liq_add({"chain": chain,
+                                  "symbol": EVM_CHAINS[chain].get("native_symbol", "NATIVE"),
+                                  "ok": res.ok, "tx_id": res.tx_id,
+                                  "target": target_label, "error": res.error})
         else:
             for t in entry.get("tokens", []):
                 _liq_add({"chain": chain, "symbol": t["symbol"], "ok": False,

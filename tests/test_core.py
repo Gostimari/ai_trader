@@ -1026,6 +1026,106 @@ class TestStablecoinLiquidationAndKey:
         assert calls == [("0x" + "de" * 20,
                           "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 37.0)]
 
+    def test_emergency_real_mode_skips_self_swap_and_dust(self, db, monkeypatch):
+        """Regression: the liquidation swapped EVERY token blindly - the
+        USDC proceeds of an earlier sale were 'swapped' USDC->USDC through
+        WETH and a fully-sold token's dust round-tripped to a zero raw
+        amount (UniswapV2 INSUFFICIENT_INPUT_AMOUNT). Both wasted gas on
+        reverting swaps; both are now skipped with honest rows."""
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        import memicoin_core.onchain as oc
+        USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        DEGEN = "0x" + "de" * 20
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has",
+                            lambda k: k == "onchain_private_key")
+        c0 = load_constraints(db)
+        c0.paper_trading = False
+        c0.live_execution_mode = "onchain"
+        db.set_setting("constraints", c0.to_json())
+        monkeypatch.setattr(oc, "build_extra_contracts",
+                            lambda s, m: {"base": [{"address": DEGEN, "symbol": "DEGEN"}]})
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                            lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0.0, "tokens": [
+                    {"symbol": "USDC", "contract": USDC, "balance": 0.18},
+                    {"symbol": "DEGEN", "contract": DEGEN, "balance": 1e-9}]}}},
+            "solana": None})
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {"USDC": 1.0})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        calls = []
+
+        class _FakeW:
+            def __init__(self, s, c):
+                self.cfg = {"router": "0xr", "weth": "0xw", "chain_id": 8453}
+            def router_quote_min_out(self, tin, tout, amt, slip_pct,
+                                     cap_to_balance=True):
+                return 0.0 if amt < 1e-6 else amt * (1 - slip_pct / 100)
+            def swap_exact_tokens_for_tokens(self, tin, tout, amt,
+                                             min_amount_out=None):
+                calls.append((tin, tout, amt))
+                from memicoin_core.onchain import TxResult
+                return TxResult(True, tx_id="0xliq")
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        c = TestClient(srv.app)
+        d = _liq_post_and_wait(c)
+        assert calls == [], "no swap should be attempted for self-swap or dust"
+        by_sym = {r["symbol"]: r for r in d["results"]}
+        assert by_sym["USDC"]["ok"] is True
+        assert "already the stablecoin target" in by_sym["USDC"]["error"]
+        assert by_sym["DEGEN"]["ok"] is True
+        assert "dust" in by_sym["DEGEN"]["error"]
+
+    def test_emergency_real_mode_converts_native_above_reserve(self, db, monkeypatch):
+        """Regression: the real-mode liquidation skipped the native gas token
+        entirely, so 'Convert all to USDC' left the wallet's largest asset
+        (ETH) untouched while the demo branch already converted it."""
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        import memicoin_core.onchain as oc
+        USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has",
+                            lambda k: k == "onchain_private_key")
+        c0 = load_constraints(db)
+        c0.paper_trading = False
+        c0.live_execution_mode = "onchain"
+        db.set_setting("constraints", c0.to_json())
+        monkeypatch.setattr(oc, "build_extra_contracts", lambda s, m: {})
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                            lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0.001, "tokens": []}}},
+            "solana": None})
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        calls = []
+
+        class _FakeW:
+            def __init__(self, s, c):
+                self.cfg = {"router": "0xr", "weth": "0xw", "chain_id": 8453}
+            def investable_native(self):
+                return 0.0009
+            def router_quote_min_out(self, tin, tout, amt, slip_pct,
+                                     cap_to_balance=True):
+                assert cap_to_balance is False, "native input must not be capped at the WETH token balance"
+                return amt * 3000.0 * (1 - slip_pct / 100)
+            def swap_exact_eth_for_tokens(self, tout, amt, min_amount_out=None):
+                calls.append((tout, amt, min_amount_out))
+                from memicoin_core.onchain import TxResult
+                return TxResult(True, tx_id="0xnative")
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        c = TestClient(srv.app)
+        d = _liq_post_and_wait(c)
+        assert len(calls) == 1
+        tout, amt, min_out = calls[0]
+        assert tout == USDC and amt == 0.0009
+        assert min_out is not None and min_out > 0
+        res = d["results"][0]
+        assert res["ok"] is True and res["symbol"] == "ETH"
+
     def test_mistral_key_stored_never_returned(self, db, monkeypatch):
         import app.server as srv
         from fastapi.testclient import TestClient
@@ -3733,6 +3833,7 @@ class TestSlippageBound:
         w.w3 = _W3()
         w.address = lambda: "0x" + "a" * 40
         w._erc20_decimals = lambda t: 18
+        w.erc20_raw_balance = lambda t: 10 ** 18
         w.erc20_approve_if_needed = lambda *a, **k: None
         w._base_tx = lambda to, data, value=0: {"to": to, "data": data}
         w._send = lambda tx: "0xdeadbeef"
@@ -4631,6 +4732,101 @@ class TestSwapPathAndArcRouter:
         w.gas_reserve = lambda: 0.0
         r = w.swap_exact_eth_for_tokens("0x" + "22" * 20, 0.5, min_amount_out=1.0)
         assert not r.ok and "wrapped-native" in r.error
+
+
+class TestSwapRawAmountCappedAtBalance:
+    """Regression: raw_in was computed from the float balance round-trip -
+    int(37.67070443783452 * 1e18) = 37670704437834522624 exceeded the real
+    BRETT balance 37670704437834521199 by 1425 wei, so transferFrom reverted
+    TRANSFER_FROM_FAILED even with a MAX allowance (live-simulated: the
+    bot's exact amount reverts, the exact raw balance swaps fine)."""
+
+    RAW = 37670704437834521199
+
+    def _wallet(self, raw_balance=37670704437834521199):
+        from memicoin_core.onchain import EVMWallet
+        from unittest.mock import MagicMock
+        from web3 import Web3
+        weth = Web3.to_checksum_address("0x" + "aa" * 20)
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "base"
+        w.cfg = {"chain_id": 8453,
+                 "router": Web3.to_checksum_address("0x" + "bb" * 20),
+                 "weth": weth}
+        w._acct = None
+        w.address = lambda: Web3.to_checksum_address("0x" + "a" * 40)
+        state = {"swap_args": None, "quote_amts": []}
+        token_fns = MagicMock()
+        token_fns.balanceOf.return_value.call.return_value = raw_balance
+        token_fns.allowance.return_value.call.return_value = 2 ** 256 - 1
+        router_c = MagicMock()
+        router_c.functions.WETH.return_value.call.return_value = bytes.fromhex(weth[2:])
+
+        def gao(amt, path):
+            state["quote_amts"].append(amt)
+            r = MagicMock()
+            r.call.return_value = [amt, amt // 2, 148752]
+            return r
+        router_c.functions.getAmountsOut.side_effect = gao
+        router_c.encode_abi.side_effect = lambda name, args: (
+            state.__setitem__("swap_args", list(args)), b"0xdata")[1]
+
+        def contract(address=None, abi=None):
+            if address == w.cfg["router"]:
+                return router_c
+            c = MagicMock()
+            c.functions = token_fns
+            return c
+        w.w3 = MagicMock()
+        w.w3.eth.contract.side_effect = contract
+        w.w3.eth.get_code.return_value = b"\x60\x80"
+        w._erc20_decimals = lambda t: 18
+        w._retry_on_rpc_failure = lambda f: f()
+        w._base_tx = lambda to, data, value=0: {"to": to, "data": data}
+        w._send = lambda tx: "0xdeadbeef"
+        w._state = state
+        return w
+
+    def test_swap_caps_raw_amount_at_onchain_balance(self):
+        w = self._wallet(raw_balance=self.RAW)
+        r = w.swap_exact_tokens_for_tokens(
+            "0x" + "11" * 20, "0x" + "22" * 20, 37.67070443783452,
+            min_amount_out=0.14)
+        assert r.ok, r.error
+        assert w._state["swap_args"] is not None
+        assert w._state["swap_args"][0] == self.RAW, (
+            f"swap must spend the on-chain balance, not "
+            f"{w._state['swap_args'][0]} (float round-trip overshoot)")
+
+    def test_swap_refuses_zero_or_dust_balance(self):
+        w = self._wallet(raw_balance=0)
+        r = w.swap_exact_tokens_for_tokens(
+            "0x" + "11" * 20, "0x" + "22" * 20, 1e-9,
+            min_amount_out=0.14)
+        assert not r.ok and "dust" in r.error
+        assert w._state["swap_args"] is None
+
+    def test_quote_is_capped_at_the_same_balance(self):
+        w = self._wallet(raw_balance=self.RAW)
+        min_out = w.router_quote_min_out(
+            "0x" + "11" * 20, "0x" + "22" * 20, 37.67070443783452, 5.0)
+        assert w._state["quote_amts"] == [self.RAW]
+        assert min_out > 0
+
+    def test_quote_returns_zero_for_dust(self):
+        w = self._wallet(raw_balance=0)
+        min_out = w.router_quote_min_out(
+            "0x" + "11" * 20, "0x" + "22" * 20, 1e-9, 5.0)
+        assert min_out == 0.0
+        assert w._state["quote_amts"] == []
+
+    def test_native_quote_not_capped_at_weth_balance(self):
+        w = self._wallet(raw_balance=0)
+        min_out = w.router_quote_min_out(
+            w.cfg["weth"], "0x" + "22" * 20, 0.001, 5.0,
+            cap_to_balance=False)
+        assert w._state["quote_amts"] == [10 ** 15]
+        assert min_out > 0
 
 
 class TestArcBuyRouting:
