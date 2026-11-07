@@ -325,13 +325,13 @@ class EVMWallet:
         ([in, weth, out]); direct pairs when an endpoint IS the wrapped
         native; ArcSwap has no wrapped native at all - every pair is
         token<->USDC direct."""
-        tin = _checksum(token_in).lower()
-        tout = _checksum(token_out).lower()
+        tin = _checksum(token_in)
+        tout = _checksum(token_out)
         weth = self._weth()
         if not weth:
             return [tin, tout]
-        w = _checksum(weth).lower()
-        if tin == w or tout == w:
+        w = _checksum(weth)
+        if tin.lower() == w.lower() or tout.lower() == w.lower():
             return [tin, tout]
         return [tin, w, tout]
 

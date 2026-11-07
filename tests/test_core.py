@@ -4552,20 +4552,34 @@ class TestSwapPathAndArcRouter:
         return w
 
     def test_swap_path_routes_through_weth(self):
+        from web3 import Web3
         w = self._wallet()
         path = w._swap_path("0x" + "11" * 20, "0x" + "22" * 20)
-        assert path == ["0x" + "11" * 20, "0x" + "aa" * 20, "0x" + "22" * 20]
+        assert path == ["0x" + "11" * 20,
+                        Web3.to_checksum_address("0x" + "aa" * 20),
+                        "0x" + "22" * 20]
+        # web3 v8 validates EVERY address argument in contract calls -
+        # lowercase path elements crash the quote and the swap outright
+        for a in path:
+            assert Web3.is_checksum_address(a), a
 
     def test_swap_path_direct_when_endpoint_is_weth(self):
+        from web3 import Web3
         weth = "0x" + "aa" * 20
         w = self._wallet(weth=weth)
-        assert w._swap_path(weth, "0x" + "22" * 20) == [weth, "0x" + "22" * 20]
-        assert w._swap_path("0x" + "11" * 20, weth) == ["0x" + "11" * 20, weth]
+        out = "0x" + "22" * 20
+        for path in (w._swap_path(weth, out), w._swap_path("0x" + "11" * 20, weth)):
+            assert len(path) == 2
+            for a in path:
+                assert Web3.is_checksum_address(a), a
 
     def test_swap_path_direct_on_arc(self):
+        from web3 import Web3
         w = self._wallet(chain="arc", weth=None)
-        assert w._swap_path("0x" + "11" * 20, "0x" + "22" * 20) == \
-            ["0x" + "11" * 20, "0x" + "22" * 20]
+        path = w._swap_path("0x" + "11" * 20, "0x" + "22" * 20)
+        assert path == ["0x" + "11" * 20, "0x" + "22" * 20]
+        for a in path:
+            assert Web3.is_checksum_address(a), a
 
     def test_quote_and_swap_share_the_same_path(self):
         from unittest.mock import MagicMock
@@ -4584,7 +4598,9 @@ class TestSwapPathAndArcRouter:
 
         def weth_call():
             r = MagicMock()
-            r.call.return_value = bytes.fromhex(weth[2:])
+            from web3 import Web3 as _W3
+            r.call.return_value = bytes.fromhex(
+                _W3.to_checksum_address(weth)[2:])
             return r
         fns.WETH.side_effect = weth_call
         contract = MagicMock()
@@ -4604,8 +4620,9 @@ class TestSwapPathAndArcRouter:
         r = w.swap_exact_tokens_for_tokens("0x" + "11" * 20, "0x" + "22" * 20,
                                            1.0, min_amount_out=0.9)
         assert r.ok
+        from web3 import Web3 as _W3
         assert paths["quote"] == paths["swap"] == \
-            ["0x" + "11" * 20, weth, "0x" + "22" * 20]
+            ["0x" + "11" * 20, _W3.to_checksum_address(weth), "0x" + "22" * 20]
 
     def test_arc_swap_refuses_native_value_path(self):
         from memicoin_core.onchain import EVMWallet
