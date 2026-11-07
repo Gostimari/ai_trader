@@ -34,6 +34,11 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._migrate()
+        # lightweight migration: demo_wallet.cost_basis_usd (added later
+        # than the original schema; runs after tables exist)
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(demo_wallet)")]
+        if "cost_basis_usd" not in cols:
+            self.conn.execute("ALTER TABLE demo_wallet ADD COLUMN cost_basis_usd REAL DEFAULT 0")
 
     def _migrate(self) -> None:
         cur = self.conn
@@ -85,19 +90,103 @@ class Database:
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 usd REAL NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS news_cache (
+            CREATE TABLE IF NOT EXISTS demo_wallet (
                 id TEXT PRIMARY KEY,
-                fetched_at TEXT NOT NULL,
-                payload TEXT NOT NULL
+                chain TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                contract TEXT DEFAULT '',
+                balance REAL NOT NULL DEFAULT 0,
+                is_gas INTEGER NOT NULL DEFAULT 0,
+                cost_basis_usd REAL DEFAULT 0,
+                UNIQUE(chain, asset, contract)
+            );
+            CREATE TABLE IF NOT EXISTS live_basis (
+                chain TEXT NOT NULL,
+                contract TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                cost_usd REAL NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(chain, contract)
+            );
+            CREATE TABLE IF NOT EXISTS pending_bridges (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                src_chain TEXT NOT NULL,
+                dst_chain TEXT NOT NULL,
+                amount REAL NOT NULL,
+                message_hash TEXT NOT NULL,
+                message_bytes TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
             );
             """
         )
         self.conn.commit()
 
+    # ---------- live cost-basis ledger (real-mode P&L) ----------
+    def live_basis_add(self, chain: str, contract: str, qty: float,
+                       cost_usd: float) -> None:
+        """Record a bot buy: weighted-average cost upsert (quantity and cost
+        accumulate across buys of the same token)."""
+        if not contract or qty <= 0 or cost_usd < 0:
+            return
+        with _lock:
+            row = self.conn.execute(
+                "SELECT quantity, cost_usd FROM live_basis "
+                "WHERE chain=? AND contract=?", (chain, contract.lower())).fetchone()
+            if row and row["quantity"] > 0:
+                new_qty, new_cost = row["quantity"] + qty, row["cost_usd"] + cost_usd
+            else:
+                new_qty, new_cost = qty, cost_usd
+            self.conn.execute(
+                "INSERT INTO live_basis (chain, contract, quantity, cost_usd, updated_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(chain, contract) DO UPDATE SET "
+                "quantity=excluded.quantity, cost_usd=excluded.cost_usd, "
+                "updated_at=excluded.updated_at",
+                (chain, contract.lower(), new_qty, new_cost, utcnow()))
+            self.conn.commit()
+
+    def live_basis_reduce(self, chain: str, contract: str, qty: float) -> None:
+        """Record a bot sell: cost leaves proportionally to the quantity sold."""
+        if not contract or qty <= 0:
+            return
+        with _lock:
+            row = self.conn.execute(
+                "SELECT quantity, cost_usd FROM live_basis "
+                "WHERE chain=? AND contract=?", (chain, contract.lower())).fetchone()
+            if not row or row["quantity"] <= 0:
+                return
+            frac = min(1.0, qty / row["quantity"])
+            new_qty = max(0.0, row["quantity"] - qty)
+            new_cost = row["cost_usd"] * (1.0 - frac)
+            if new_qty <= 1e-12:
+                new_qty, new_cost = 0.0, 0.0
+            self.conn.execute(
+                "INSERT INTO live_basis (chain, contract, quantity, cost_usd, updated_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(chain, contract) DO UPDATE SET "
+                "quantity=excluded.quantity, cost_usd=excluded.cost_usd, "
+                "updated_at=excluded.updated_at",
+                (chain, contract.lower(), new_qty, new_cost, utcnow()))
+            self.conn.commit()
+
+    def live_basis_get(self, chain: str, contract: str) -> dict | None:
+        if not contract:
+            return None
+        row = self.conn.execute(
+            "SELECT quantity, cost_usd FROM live_basis "
+            "WHERE chain=? AND contract=?", (chain, contract.lower())).fetchone()
+        if not row or row["quantity"] <= 0:
+            return None
+        return {"quantity": row["quantity"], "cost_usd": row["cost_usd"]}
+
     # ---------- settings ----------
     def get_setting(self, key: str, default: Any = None) -> Any:
         row = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value"]) if row else default
+
+    def list_settings(self) -> list[str]:
+        with _lock:
+            rows = self.conn.execute("SELECT key FROM settings").fetchall()
+        return [r["key"] for r in rows]
 
     def set_setting(self, key: str, value: Any) -> None:
         with _lock:
@@ -212,16 +301,193 @@ class Database:
             )
             self.conn.commit()
 
-    # ---------- news ----------
-    def save_news(self, payload: Any) -> None:
+    # ---------- demo wallet ----------
+    def demo_rows(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM demo_wallet").fetchall()
+        return [dict(r) for r in rows]
+
+    def demo_get(self, chain: str, asset: str, contract: str = "") -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM demo_wallet WHERE chain=? AND asset=? AND contract=?",
+            (chain, asset, contract)).fetchone()
+        return dict(row) if row else None
+
+    def demo_set(self, chain: str, asset: str, balance: float,
+                 contract: str = "", is_gas: bool = False,
+                 cost_basis_usd: float | None = None) -> None:
+        """User-facing row setter. Cost basis is ONLY set when explicitly
+        given (bot trades pass it); manual user rows get NO basis (0) so
+        their P&L shows '-' honestly instead of a bogus number."""
         with _lock:
-            self.conn.execute("DELETE FROM news_cache")
             self.conn.execute(
-                "INSERT INTO news_cache (id, fetched_at, payload) VALUES (?,?,?)",
-                (new_id(), utcnow(), json.dumps(payload)),
+                "INSERT INTO demo_wallet (id, chain, asset, contract, balance, is_gas, cost_basis_usd) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(chain, asset, contract) DO UPDATE SET "
+                "balance=excluded.balance, is_gas=excluded.is_gas, "
+                "cost_basis_usd=COALESCE(excluded.cost_basis_usd, demo_wallet.cost_basis_usd)",
+                (new_id(), chain, asset, contract, balance, 1 if is_gas else 0,
+                 cost_basis_usd or 0.0),
             )
             self.conn.commit()
 
-    def latest_news(self) -> dict | None:
-        row = self.conn.execute("SELECT * FROM news_cache LIMIT 1").fetchone()
-        return dict(row) if row else None
+    def demo_adjust(self, chain: str, asset: str, delta: float,
+                    contract: str = "", is_gas: bool = False,
+                    usd_value: float = 0.0) -> float:
+        """Add delta to a demo balance (can be negative); creates at 0 if new.
+        usd_value: the USD value of the delta, tracked for cost basis.
+        Returns the new balance. Refuses to go below 0 (returns old)."""
+        with _lock:
+            row = self.conn.execute(
+                "SELECT balance, cost_basis_usd FROM demo_wallet "
+                "WHERE chain=? AND asset=? AND contract=?",
+                (chain, asset, contract)).fetchone()
+            cur = row["balance"] if row else 0.0
+            cur_basis = row["cost_basis_usd"] if row else 0.0
+            new = cur + delta
+            if new < 0:
+                return cur  # insufficient: caller checks
+            # cost basis: buying adds USD value; selling removes proportionally
+            if delta > 0:
+                new_basis = cur_basis + usd_value
+            elif cur > 0:
+                new_basis = cur_basis * (new / cur)
+            else:
+                new_basis = 0.0
+            self.conn.execute(
+                "INSERT INTO demo_wallet (id, chain, asset, contract, balance, is_gas, cost_basis_usd) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(chain, asset, contract) DO UPDATE SET "
+                "balance=excluded.balance, cost_basis_usd=excluded.cost_basis_usd",
+                (new_id(), chain, asset, contract, new, 1 if is_gas else 0, new_basis),
+            )
+            self.conn.commit()
+            return new
+
+    def demo_delete(self, chain: str, asset: str, contract: str = "") -> None:
+        with _lock:
+            self.conn.execute(
+                "DELETE FROM demo_wallet WHERE chain=? AND asset=? AND contract=?",
+                (chain, asset, contract))
+            self.conn.commit()
+
+    def demo_clear(self) -> None:
+        with _lock:
+            self.conn.execute("DELETE FROM demo_wallet")
+            self.conn.commit()
+
+    # ---------- restore (import backup) ----------
+    def restore_settings(self, settings: dict) -> int:
+        if not isinstance(settings, dict):
+            raise ValueError("settings must be an object")
+        for key, value in settings.items():
+            self.set_setting(str(key), value)
+        return len(settings)
+
+    def restore_positions(self, rows: list) -> int:
+        if not isinstance(rows, list):
+            raise ValueError("positions must be a list")
+        with _lock:
+            self.conn.execute("DELETE FROM positions")
+            n = 0
+            for r in rows:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO positions (asset, chain, quantity, "
+                        "cost_basis_usd, updated_at) VALUES (?,?,?,?,?)",
+                        (r["asset"], r.get("chain"), float(r.get("quantity") or 0),
+                         float(r.get("cost_basis_usd") or 0),
+                         r.get("updated_at") or utcnow()))
+                    n += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self.conn.commit()
+        return n
+
+    def restore_decisions(self, rows: list) -> int:
+        if not isinstance(rows, list):
+            raise ValueError("decisions must be a list")
+        with _lock:
+            self.conn.execute("DELETE FROM decisions")
+            n = 0
+            for r in rows:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO decisions (id, cycle_id, timestamp, action, "
+                        "asset_in, asset_out, amount, value_usd, pnl_per_trade, status, "
+                        "reason, tx_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (r.get("id", new_id()), r.get("cycle_id"),
+                         r.get("timestamp", utcnow()), r["action"], r.get("asset_in"),
+                         r.get("asset_out"), r.get("amount"), r.get("value_usd"),
+                         r.get("pnl_per_trade"), r["status"], r.get("reason", ""),
+                         r.get("tx_id")))
+                    n += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self.conn.commit()
+        return n
+
+    def restore_cycles(self, rows: list) -> int:
+        if not isinstance(rows, list):
+            raise ValueError("cycles must be a list")
+        with _lock:
+            self.conn.execute("DELETE FROM cycles")
+            n = 0
+            for r in rows:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO cycles (id, timestamp, status, ai_input, "
+                        "ai_output, analysis_summary, confidence, error) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (r["id"], r.get("timestamp", utcnow()), r.get("status", "unknown"),
+                         r.get("ai_input"), r.get("ai_output"),
+                         r.get("analysis_summary"), r.get("confidence"), r.get("error")))
+                    n += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self.conn.commit()
+        return n
+
+    def restore_demo_wallet(self, rows: list) -> int:
+        if not isinstance(rows, list):
+            raise ValueError("demo_wallet must be a list")
+        with _lock:
+            self.conn.execute("DELETE FROM demo_wallet")
+            n = 0
+            for r in rows:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO demo_wallet (id, chain, asset, contract, "
+                        "balance, is_gas, cost_basis_usd) VALUES (?,?,?,?,?,?,?)",
+                        (r.get("id", new_id()), r["chain"], r["asset"],
+                         r.get("contract", ""), float(r.get("balance") or 0),
+                         1 if r.get("is_gas") else 0,
+                         float(r.get("cost_basis_usd") or 0)))
+                    n += 1
+                except (KeyError, TypeError, ValueError):
+                    continue
+            self.conn.commit()
+        return n
+
+    # ---------- pending bridges (CCTP burn confirmed, mint awaiting
+    # attestation; completed on a later cycle) ----------
+    def add_pending_bridge(self, src_chain: str, dst_chain: str, amount: float,
+                           message_hash: str, message_bytes: str) -> str:
+        pid = new_id()
+        with _lock:
+            self.conn.execute(
+                "INSERT INTO pending_bridges (id, created_at, src_chain, dst_chain, "
+                "amount, message_hash, message_bytes, status) "
+                "VALUES (?,?,?,?,?,?,?, 'pending')",
+                (pid, utcnow(), src_chain, dst_chain, float(amount),
+                 message_hash, message_bytes))
+            self.conn.commit()
+        return pid
+
+    def list_pending_bridges(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM pending_bridges WHERE status='pending' ORDER BY created_at"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_pending_bridge(self, pid: str) -> None:
+        with _lock:
+            self.conn.execute("DELETE FROM pending_bridges WHERE id=?", (pid,))
+            self.conn.commit()

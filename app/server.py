@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -18,6 +19,7 @@ from memicoin_core.market import MarketDataError, MarketDataModule
 from memicoin_core.news import NewsModule
 from memicoin_core.portfolio import PortfolioTracker
 from memicoin_core.scheduler import DailyScheduler
+from memicoin_core.secrets import SecretStore
 from memicoin_core.settings import Constraints, load_constraints
 
 DB_PATH = os.environ.get("MEMICOIN_DB", os.path.join(os.getcwd(), "data", "memicoin.db"))
@@ -28,24 +30,85 @@ _constraints0 = load_constraints(db)
 if db.get_cash() == 0.0 and not db.get_positions() and not db.list_decisions(1):
     db.set_cash(_constraints0.starting_capital_usd)
 market = MarketDataModule(db)
-news = NewsModule(db)
 tracker = PortfolioTracker(db)
+news = NewsModule()
+
+
+secrets = SecretStore()
 
 
 def make_engine() -> DecisionEngine:
-    return DecisionEngine(db, load_constraints(db), market, news)
+    return DecisionEngine(db, load_constraints(db), market,
+                          onchain_secrets=secrets)
 
 
 scheduler = DailyScheduler(db, make_engine)
-scheduler.start()
 
-app = FastAPI(title="MemeCoin AI Trader", docs_url=None, redoc_url=None)
+app = FastAPI(title="AI Crypto Trader", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+
+
+@app.on_event("startup")
+def _start_scheduler():
+    scheduler.start()
 
 
 @app.get("/")
 def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
+
+
+@app.get("/api/news")
+def get_news():
+    items = news.get_news()
+    return {"news": items, "error": news.last_error or None,
+            "cached": bool(news._cache) and news._cache is items}
+
+
+@app.get("/api/export")
+def export_data():
+    """Full JSON backup of the app's local state (no secrets: keys stay in
+    the encrypted store and are never exported)."""
+    from memicoin_core.db import utcnow
+    return {
+        "exported_at": utcnow(),
+        "settings": {k: db.get_setting(k) for k in db.list_settings()},
+        "positions": db.get_positions(),
+        "decisions": db.list_decisions(limit=10000),
+        "cycles": db.list_cycles(),
+        "demo_wallet": db.demo_rows(),
+        "cash": db.get_cash(),
+    }
+
+
+@app.post("/api/import")
+def import_data(payload: dict = Body(...), confirm: bool = False):
+    """Restore a backup produced by GET /api/export. Overwrites ALL local
+    state (settings, positions, decisions, cycles, demo wallet, cash).
+    Requires ?confirm=true. Secrets are untouched: wallet/API keys stay in
+    the encrypted store and are never part of a backup."""
+    if not confirm:
+        raise HTTPException(status_code=400,
+                            detail="Import overwrites all local data; call again with ?confirm=true")
+    if not isinstance(payload, dict) or not isinstance(payload.get("settings"), dict):
+        raise HTTPException(status_code=400,
+                            detail="Invalid backup file: expected a JSON document from /api/export")
+    counts: dict = {}
+    counts["settings"] = db.restore_settings(payload.get("settings") or {})
+    if "cash" in payload:
+        try:
+            db.set_cash(float(payload["cash"]))
+            counts["cash"] = 1
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Invalid cash value in backup")
+    try:
+        counts["positions"] = db.restore_positions(payload.get("positions") or [])
+        counts["decisions"] = db.restore_decisions(payload.get("decisions") or [])
+        counts["cycles"] = db.restore_cycles(payload.get("cycles") or [])
+        counts["demo_wallet"] = db.restore_demo_wallet(payload.get("demo_wallet") or [])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"imported": counts}
 
 
 @app.get("/api/state")
@@ -60,8 +123,16 @@ def state():
                      "total_pnl_usd": 0, "total_pnl_pct": 0, "total_cost_basis_usd": 0,
                      "as_of": None}
         market_ok = False
+    mode = ("demo" if constraints.live_execution_mode != "onchain" else "real")
+    wallet_view = None
+    try:
+        wallet_view = _cached_wallet_view(mode)
+    except Exception:
+        wallet_view = None
     return {
         "portfolio": portfolio,
+        "mode": mode,
+        "wallet_view": wallet_view,
         "constraints": constraints.to_json(),
         "market_ok": market_ok,
         "trading_paused": constraints.trading_paused,
@@ -71,17 +142,388 @@ def state():
     }
 
 
-@app.get("/api/market")
-def market_overview():
+# Wallet views hit RPCs and price APIs; /api/state polls them every minute
+# and after every UI action, so keep a short-lived snapshot and refresh it
+# only when stale or explicitly invalidated by a mutating endpoint.
+_VIEW_TTL_S = 30.0
+_view_cache: dict = {"key": None, "data": None, "ts": 0.0}
+
+
+def _invalidate_view_cache() -> None:
+    _view_cache["key"] = None
+    _view_cache["data"] = None
+    _view_cache["ts"] = 0.0
+
+
+def _cached_wallet_view(mode: str, force: bool = False) -> dict:
+    now = time.time()
+    c = _view_cache
+    if (not force and c["key"] == mode and c["data"] is not None
+            and now - c["ts"] < _VIEW_TTL_S):
+        return c["data"]
+    data = wallet_balances() if mode == "real" else _demo_wallet_view()
+    c["key"], c["data"], c["ts"] = mode, data, now
+    return data
+
+
+def _demo_wallet_view():
+    """Demo-wallet holdings shaped like the real wallet view."""
+    from memicoin_core.demowallet import DemoWallet
+    demo = DemoWallet(db)
+    from memicoin_core.demowallet import NATIVE_WRAPPED
+    all_rows = demo.rows()
+    # prices and addr_prices fail INDEPENDENTLY: one source being down
+    # must not wipe the other (this wiped symbol prices -> $0 tokens)
     try:
-        return {"assets": market.get_market_overview(force=True)}
-    except MarketDataError as e:
-        raise HTTPException(503, str(e))
+        prices = market.get_prices()
+    except MarketDataError:
+        prices = {}
+    contracts = [r["contract"] for r in all_rows if r.get("contract")]
+    for r in all_rows:
+        if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc":
+            contracts.append(NATIVE_WRAPPED[r["chain"]])
+    addr_prices = {}
+    if contracts:
+        try:
+            addr_prices = market.get_prices_for_addresses(contracts)
+        except Exception:
+            addr_prices = {}
+    # batch the wrapped contracts even when the loop above failed silently
+    try:
+        extra = [NATIVE_WRAPPED[r["chain"]] for r in all_rows
+                 if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc"]
+        if extra:
+            more = market.get_prices_for_addresses(extra)
+            for k, v in more.items():
+                addr_prices.setdefault(k, v)
+    except Exception:
+        pass
+    chains: dict = {}
+    total = 0.0
+    gas = {}
+    for r in all_rows:
+        p = prices.get(r["asset"].upper(), 0.0)
+        if p <= 0 and r.get("contract"):
+            p = addr_prices.get(r["contract"].lower(), 0.0)
+        if p <= 0 and r["is_gas"]:
+            wrapped = NATIVE_WRAPPED.get(r["chain"])
+            if r["chain"] == "arc":
+                p = 1.0
+            elif wrapped:
+                p = addr_prices.get(wrapped.lower(), 0.0)
+        if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
+            p = 1.0
+        value = r["balance"] * p
+        basis = r.get("cost_basis_usd") or 0.0
+        row = {"symbol": r["asset"], "balance": r["balance"], "value_usd": value,
+               "chain": r["chain"], "kind": "gas" if r["is_gas"] else "token",
+               "contract": r.get("contract", ""),
+               "cost_basis_usd": basis,
+               "pnl_usd": (value - basis) if basis > 0 else None,
+               "pnl_pct": ((value - basis) / basis * 100) if basis > 0 else None}
+        chains.setdefault(r["chain"], []).append(row)
+        total += row["value_usd"]
+        if r["is_gas"]:
+            gas[r["chain"]] = row["balance"]
+    # wallet-level P&L: total value vs total cost basis of bot-acquired assets
+    total_basis = sum(r.get("cost_basis_usd") or 0.0 for rows in chains.values()
+                      for r in rows if not r.get("is_gas_row"))
+    return {"chains": chains, "total_usd": total, "gas": gas,
+            "total_cost_basis_usd": total_basis,
+            "total_pnl_usd": total - total_basis if total_basis > 0 else None}
+
+
+class EtherscanKeyPayload(BaseModel):
+    api_key: str
+
+
+@app.post("/api/etherscan-key")
+def set_etherscan_key(p: EtherscanKeyPayload):
+    """Store the (free) Etherscan V2 API key for EVM token discovery.
+    Encrypted at rest, never returned."""
+    key = p.api_key.strip()
+    if not key:
+        secrets.delete("etherscan_api_key")
+        return {"ok": True, "configured": False}
+    secrets.set("etherscan_api_key", key)
+    return {"ok": True, "configured": True}
+
+
+class WatchlistPayload(BaseModel):
+    asset_ids: list[str]
+
+
+@app.get("/api/watchlist")
+def get_watchlist():
+    from memicoin_core.market import DEFAULT_EXTRA_IDS
+    return {"asset_ids": db.get_setting("extra_asset_ids", DEFAULT_EXTRA_IDS) or []}
+
+
+@app.post("/api/watchlist")
+def set_watchlist(p: WatchlistPayload):
+    ids = [i.strip() for i in p.asset_ids if i.strip()][:30]
+    db.set_setting("extra_asset_ids", ids)
+    return {"ok": True, "asset_ids": ids}
+
+
+@app.get("/api/wallet/balances")
+def wallet_balances():
+    """Real wallet holdings: native + known tokens per chain, valued in USD
+    via the (cached) DexScreener prices. Only meaningful in real-money mode."""
+    if not (secrets.has("onchain_private_key") or secrets.has("onchain_solana_private_key")):
+        return {"configured": False, "chains": {}, "total_usd": 0.0}
+    from memicoin_core.onchain import read_wallet_balances
+    # watchlist contracts + AUTOMATIC DISCOVERY (Etherscan V2 key, if
+    # provided): every token the wallet ever transacted. Actual balances
+    # are still read on-chain afterwards.
+    from memicoin_core.onchain import build_extra_contracts
+    extra_contracts = build_extra_contracts(secrets, market)
+    raw = read_wallet_balances(secrets, extra_contracts=extra_contracts)
+    # 3) Solana: token accounts are directly enumerable, no key needed
+    sol = raw.get("solana")
+    if sol and sol.get("address"):
+        try:
+            from memicoin_core.discovery import discover_solana_tokens
+            for t in discover_solana_tokens(sol["address"]):
+                sol.setdefault("tokens", []).append(
+                    {"symbol": t["address"][:8], "contract": t["address"],
+                     "balance": t["balance"]})
+        except Exception:
+            pass
+    try:
+        prices = market.get_prices()
+        asset_map = market.get_asset_map()
+    except MarketDataError:
+        prices, asset_map = {}, {}
+
+    # Native coins have no contract of their own; DexScreener prices their
+    # WRAPPED equivalents. Map native -> wrapped contract per chain so the
+    # batch pricer can value native balances (ETH on Base, POL, BNB, ...).
+    NATIVE_WRAPPED = {
+        "ethereum": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",  # WETH
+        "base": "0x4200000000000000000000000000000000000006",      # WETH (base)
+        "polygon": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",   # WPOL
+        "binance-smart-chain": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+        "solana": "So11111111111111111111111111111111111111112",   # wrapped SOL
+    }
+
+    # batch-price every contract the wallet holds so discovered tokens get
+    # real USD values: contracts come from the RAW balance data (rows are
+    # built below), priced via DexScreener in batches of 30
+    all_contracts = []
+    evm_raw = (raw.get("evm") or {}).get("chains") or {}
+    for entry in evm_raw.values():
+        for t in entry.get("tokens", []):
+            c = t.get("contract") or ""
+            if c and len(c) >= 32:
+                all_contracts.append(c)
+    sol_raw = raw.get("solana") or {}
+    for t in sol_raw.get("tokens", []):
+        c = t.get("contract") or t.get("address") or ""
+        if c and len(c) >= 32:
+            all_contracts.append(c)
+    # wrapped-native contracts price the native balances
+    for chain, entry in evm_raw.items():
+        if entry.get("native", 0) > 0 and chain in NATIVE_WRAPPED:
+            all_contracts.append(NATIVE_WRAPPED[chain])
+    if (sol_raw.get("native") or 0) > 0:
+        all_contracts.append(NATIVE_WRAPPED["solana"])
+    addr_prices: dict = {}
+    try:
+        if all_contracts:
+            addr_prices = market.get_prices_for_addresses(all_contracts)
+    except MarketDataError:
+        pass
+
+    # Fallback discovery: tokens whose balance we know but whose contract
+    # produced no price (e.g. Arc, which the Etherscan V2 API may not
+    # index). Resolve the SYMBOL via DexScreener search on the token's own
+    # chain, take that contract's price. Bounded: one search per unpriced
+    # symbol, results cached by the market module.
+    def _resolve_symbol_price(symbol: str, chain: str) -> float:
+        try:
+            pairs = market._ds_search(symbol)
+        except Exception:
+            return 0.0
+        best_price, best_liq = 0.0, -1.0
+        for p in pairs:
+            if (p.get("chainId") or "") != chain:
+                continue
+            base = p.get("baseToken") or {}
+            if (base.get("symbol") or "").upper() != symbol.upper():
+                continue
+            liq = float((p.get("liquidity") or {}).get("usd") or 0.0)
+            price = float(p.get("priceUsd") or 0.0)
+            if price > 0 and liq > best_liq:
+                best_price, best_liq = price, liq
+        return best_price
+
+    native_prices = {"ethereum": "ETH", "base": "ETH", "polygon": "POL",
+                     "binance-smart-chain": "BNB", "arc": "USDC", "solana": "SOL"}
+    # native coins we can price via watchlist lookups (symbols in market data)
+    chains: dict = {}
+    total = 0.0
+
+    def value_of(symbol: str, balance: float, contract: str = "",
+                chain: str = "") -> float:
+        p = prices.get(symbol.upper(), 0.0)
+        if p <= 0 and contract:
+            p = addr_prices.get(contract.lower(), 0.0)
+        if p <= 0 and symbol and chain:
+            p = _symbol_fallback.get((symbol.upper(), chain), 0.0)
+        # stablecoin peg floor: USDC/USDT are ~$1 by definition; on Arc
+        # USDC is native with no wrapped contract, so market data can miss it
+        if p <= 0 and symbol.upper() in ("USDC", "USDT"):
+            p = 1.0
+        return balance * p
+
+    # pre-resolve unpriced symbols once (bounded searches, memoized)
+    _symbol_fallback: dict = {}
+
+    # stablecoins never go through symbol-search: searching "USDC" returns
+    # decoy tokens with fake liquidity (verified live: a $0.0001 "USDC" on
+    # Base with $100k liquidity). The peg floor is the honest price floor.
+    STABLES = {"USDC", "USDT", "DAI", "FRAX", "USDE", "SUSDS"}
+
+    def _price_unpriced(rows_by_chain: dict) -> None:
+        for chain, rows in rows_by_chain.items():
+            for r in rows:
+                key = (r.get("symbol", "").upper(), chain)
+                if key in _symbol_fallback or not r.get("symbol"):
+                    continue
+                if r.get("value_usd", 0) > 0 or r.get("kind") == "native":
+                    continue
+                if (r.get("symbol") or "").upper() in STABLES:
+                    continue  # peg floor handles stables; search invites decoys
+                _symbol_fallback[key] = _resolve_symbol_price(r["symbol"], chain)
+
+    evm = raw.get("evm")
+    if evm:
+        for chain, entry in (evm.get("chains") or {}).items():
+            sym = entry.get("native_symbol", native_prices.get(chain, "ETH"))
+            wrapped = NATIVE_WRAPPED.get(chain, "")
+            rows = []
+            if entry.get("native", 0) > 0:
+                rows.append({"symbol": sym, "balance": entry["native"], "value_usd": 0.0,
+                             "chain": chain, "kind": "native", "contract": wrapped})
+            for t in entry.get("tokens", []):
+                rows.append({"symbol": t["symbol"], "balance": t["balance"],
+                             "value_usd": 0.0, "chain": chain, "kind": "token",
+                             "contract": t.get("contract", "")})
+            chains[chain] = rows
+        # native rows also get zeroed first for uniform final valuation
+        for chain_rows in chains.values():
+            for r in chain_rows:
+                r["value_usd"] = 0.0
+        # resolve unpriced symbols via DexScreener search (bounded, memoized)
+        _price_unpriced(chains)
+        # final valuation pass: symbol -> contract -> symbol-search -> peg
+        for chain, chain_rows in chains.items():
+            for r in chain_rows:
+                r["value_usd"] = value_of(r["symbol"], r["balance"],
+                                          r.get("contract", ""), chain)
+        total += sum(r["value_usd"] for rows in chains.values() for r in rows)
+    sol = raw.get("solana")
+    if sol:
+        rows = []
+        if sol.get("native", 0) > 0:
+            rows.append({"symbol": "SOL", "balance": sol["native"], "value_usd": 0.0,
+                         "chain": "solana", "kind": "native",
+                         "contract": NATIVE_WRAPPED["solana"]})
+        for t in sol.get("tokens", []):
+            rows.append({"symbol": t.get("symbol", "?"), "balance": t.get("balance", 0.0),
+                         "value_usd": 0.0, "chain": "solana", "kind": "token",
+                         "contract": t.get("contract", t.get("address", ""))})
+        chains["solana"] = rows
+    # live cost-basis ledger: per-token P&L for positions the BOT bought
+    # on-chain (chain reads alone can't know what was paid). Balances that
+    # drifted from the ledger (manual transfers) scale the cost proportionally.
+    total_basis = 0.0
+    for chain, chain_rows in chains.items():
+        for r in chain_rows:
+            r.setdefault("pnl_usd", None)
+            r.setdefault("pnl_pct", None)
+            if r.get("kind") != "token" or not r.get("contract"):
+                continue
+            b = db.live_basis_get(chain, r["contract"])
+            if not b or b["quantity"] <= 0:
+                continue
+            frac = min(1.0, r["balance"] / b["quantity"])
+            basis = b["cost_usd"] * frac
+            if basis > 0:
+                r["cost_basis_usd"] = basis
+                r["pnl_usd"] = r["value_usd"] - basis
+                r["pnl_pct"] = (r["value_usd"] - basis) / basis * 100
+                total_basis += basis
+
+    # gas health + warning levels per chain
+    # healthy: full reserve intact | low: < 2 swaps of headroom
+    # critical: < 1 swap left | empty: cannot transact at all
+    gas_health = {}
+    warnings = []
+
+    def _classify(chain: str, balance: float, per_swap: float, symbol: str) -> dict:
+        swaps_left = balance / per_swap if per_swap > 0 else float("inf")
+        if balance <= 0:
+            level = "empty"
+        elif swaps_left < 1:
+            level = "critical"
+        elif swaps_left < 2:
+            level = "low"
+        else:
+            level = "healthy"
+        info = {"ok": level in ("healthy", "low"),
+                "level": level, "balance": balance, "symbol": symbol,
+                "per_swap": per_swap, "swaps_left": round(swaps_left, 1),
+                "reserve": per_swap * 3, "investable": max(0.0, balance - per_swap * 3),
+                "hint": ""}
+        if level == "empty":
+            info["hint"] = f"no {symbol} on {chain}: the bot cannot transact there. Top up {symbol}."
+        elif level == "critical":
+            info["hint"] = f"almost out of gas on {chain} ({balance:.6f} {symbol} = <1 transaction). Top up {symbol} now."
+        elif level == "low":
+            info["hint"] = f"gas running low on {chain} (~{swaps_left:.0f} transactions of {symbol} left). Consider topping up."
+        return info
+
+    if secrets.has("onchain_private_key"):
+        from memicoin_core.onchain import EVMWallet, EVM_CHAINS
+        for chain in EVM_CHAINS:
+            try:
+                w = EVMWallet(secrets, chain)
+                per_swap = w.estimated_gas_cost()
+                sym = EVM_CHAINS[chain].get("native_symbol", "ETH")
+                info = _classify(chain, w.gas_balance(), per_swap, sym)
+                # only warn for chains where the wallet actually has activity
+                chain_rows = chains.get(chain) or []
+                if info["level"] in ("empty", "critical", "low") and chain_rows:
+                    warnings.append({"chain": chain, "symbol": sym,
+                                     "level": info["level"], "hint": info["hint"]})
+                gas_health[chain] = info
+            except Exception:
+                continue
+    if secrets.has("onchain_solana_private_key"):
+        try:
+            from memicoin_core.onchain import SolanaWallet
+            sw = SolanaWallet(secrets)
+            info = _classify("solana", sw.native_balance(), 0.005, "SOL")
+            gas_health["solana"] = info
+            if info["level"] in ("empty", "critical", "low"):
+                warnings.append({"chain": "solana", "symbol": "SOL",
+                                 "level": info["level"], "hint": info["hint"]})
+        except Exception:
+            pass
+    return {"configured": True, "evm_address": (evm or {}).get("address"),
+            "solana_address": (sol or {}).get("address"),
+            "chains": chains, "total_usd": total,
+            "gas": gas_health, "gas_warnings": warnings,
+            "total_cost_basis_usd": total_basis,
+            "total_pnl_usd": total - total_basis if total_basis > 0 else None,
+            "priced": bool(prices), "error": raw.get("error")}
 
 
 @app.get("/api/decisions")
-def decisions():
-    return {"decisions": db.list_decisions()}
+def decisions(limit: int = 200):
+    return {"decisions": db.list_decisions(limit=max(1, min(limit, 10000)))}
 
 
 @app.get("/api/cycles")
@@ -89,20 +531,158 @@ def cycles():
     return {"cycles": db.list_cycles()}
 
 
-@app.get("/api/news")
-def get_news():
-    return {"news": news.get_news()}
+# Fields that decide WHERE the bot trades and what it baseline-compares
+# against. They change only through their dedicated endpoints (/api/go-live,
+# /api/go-demo, /api/pause, /api/emergency-*), never through a settings save.
+MODE_CONTROL_KEYS = {"paper_trading", "live_execution_mode",
+                     "starting_capital_usd", "settings_version",
+                     "trading_paused", "emergency_stopped"}
+
+
+def _supported_onchain_chains() -> set[str]:
+    from memicoin_core.onchain import EVM_CHAINS
+    return set(EVM_CHAINS) | {"solana"}
 
 
 @app.post("/api/constraints")
 def set_constraints(c: Constraints):
+    current = load_constraints(db)
+    data = current.to_json()
+    provided = c.model_dump(exclude_unset=True)
+    if "onchain_chain" in provided and provided["onchain_chain"] not in _supported_onchain_chains():
+        raise HTTPException(400, f"onchain_chain must be one of {sorted(_supported_onchain_chains())}")
+    for k, v in provided.items():
+        if k not in MODE_CONTROL_KEYS:
+            data[k] = v
+    db.set_setting("constraints", Constraints(**data).to_json())
+    return {"ok": True}
+
+
+class GoLiveRequest(BaseModel):
+    confirm: bool
+    onchain_chain: str | None = None
+
+
+@app.post("/api/go-live")
+def go_live(req: GoLiveRequest):
+    _invalidate_view_cache()
+    """Switch to real-money mode. Requires an imported wallet key."""
+    if not req.confirm:
+        raise HTTPException(400, "Confirmation required")
+    if not (secrets.has("onchain_private_key") or secrets.has("onchain_solana_private_key")):
+        raise HTTPException(400, "No wallet imported — import a key in Settings first")
+    if req.onchain_chain and req.onchain_chain not in _supported_onchain_chains():
+        raise HTTPException(400, f"onchain_chain must be one of {sorted(_supported_onchain_chains())}")
+    c = load_constraints(db)
+    c.paper_trading = False
+    c.live_execution_mode = "onchain"
+    if req.onchain_chain:
+        c.onchain_chain = req.onchain_chain
     db.set_setting("constraints", c.to_json())
+    db.set_setting("pnl_baseline_usd", "")  # re-snapshot at the first real cycle
+    return {"ok": True, "mode": "real"}
+
+
+# ---------- on-chain wallet (Mode B) ----------
+class WalletImport(BaseModel):
+    chain: str
+    private_key: str = ""
+    seed_phrase: str = ""
+
+
+@app.post("/api/wallet/import")
+def wallet_import(w: WalletImport):
+    _invalidate_view_cache()
+    """Import a hot wallet private key. chain='evm' imports ONE key valid for
+    all EVM chains (Ethereum, Base, Polygon, BSC, Arc); chain='solana' imports
+    a Solana keypair. Keys are stored encrypted and NEVER returned; only the
+    derived public address is echoed once for user verification."""
+    chain = w.chain.strip().lower()
+    if w.seed_phrase and chain == "solana":
+        raise HTTPException(400, "Seed phrases cannot be used for Solana in this app: Solana wallets use non-standard derivation. Export the raw key from your wallet app and import that.")
+    try:
+        if chain in ("evm", "ethereum", "base", "polygon", "binance-smart-chain", "arc"):
+            from web3 import Web3
+            if w.seed_phrase:
+                words = w.seed_phrase.strip().lower().split()
+                if len(words) not in (12, 15, 18, 21, 24):
+                    raise HTTPException(400, f"Seed phrase must have 12/15/18/21/24 words — got {len(words)}")
+                from eth_account import Account
+                Account.enable_unaudited_hdwallet_features()
+                acct = Account.from_mnemonic(" ".join(words))  # standard path m/44'/60'/0'/0/0
+                secrets.set("onchain_private_key", acct.key.hex())
+                return {"ok": True, "chain": "evm", "address": acct.address,
+                        "derived_from": "seed (first account)"}
+            key = w.private_key if w.private_key.startswith("0x") else "0x" + w.private_key
+            acct = Web3().eth.account.from_key(key)
+            secrets.set("onchain_private_key", key)
+            return {"ok": True, "chain": "evm", "address": acct.address}
+        if chain == "solana":
+            import json as _json
+            from solders.keypair import Keypair
+            try:
+                kp = Keypair.from_bytes(bytes(_json.loads(w.private_key)))
+            except Exception:
+                kp = Keypair.from_base58_string(w.private_key)
+            secrets.set("onchain_solana_private_key", w.private_key)
+            return {"ok": True, "chain": "solana", "address": str(kp.pubkey())}
+        raise HTTPException(400, "Wallet type must be 'evm' or 'solana'.")
+    except HTTPException:
+        raise
+    except ModuleNotFoundError as e:
+        raise HTTPException(500, f"Server dependency missing: {e}. Run ./run.sh (or: ./.venv/bin/pip install -r requirements.txt) and restart.")
+    except Exception as e:
+        raise HTTPException(400, f"Invalid private key: {e}")
+
+
+@app.get("/api/wallet/status")
+def wallet_status():
+    out = {"evm_configured": False, "evm_address": None,
+           "solana_configured": False, "solana_address": None}
+    if secrets.has("onchain_private_key"):
+        out["evm_configured"] = True
+        try:
+            from web3 import Web3
+            out["evm_address"] = Web3().eth.account.from_key(
+                secrets.get("onchain_private_key")).address
+        except Exception:
+            pass
+    if secrets.has("onchain_solana_private_key"):
+        out["solana_configured"] = True
+        try:
+            from memicoin_core.onchain import SolanaWallet
+            out["solana_address"] = SolanaWallet(secrets).address()
+        except Exception:
+            pass
+    return out
+
+
+@app.delete("/api/wallet")
+def wallet_delete():
+    _invalidate_view_cache()
+    secrets.delete("onchain_private_key")
+    secrets.delete("onchain_solana_private_key")
+    db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
     return {"ok": True}
 
 
 @app.post("/api/cycle")
 def run_cycle():
-    result = make_engine().run_cycle()
+    try:
+        result = make_engine().run_cycle()
+    except Exception as e:
+        # a crashed cycle must surface its real reason to the user (and the
+        # log), never a bare 500 - and the open cycle row must be closed
+        import logging
+        import traceback
+        logging.getLogger("uvicorn.error").exception("decision cycle crashed")
+        last = db.list_cycles(limit=1)
+        if last and last[0].get("status") == "running":
+            db.finish_cycle(last[0]["id"], "failed", "", "",
+                            error=f"internal error: {type(e).__name__}: {e}")
+        return {"cycle_id": last[0]["id"] if last else "", "status": "failed",
+                "error": f"internal error: {type(e).__name__}: {e}"}
+    _invalidate_view_cache()
     return result
 
 
@@ -123,31 +703,245 @@ def emergency_stop():
     return {"ok": True}
 
 
+_LIQ_LOCK = __import__("threading").Lock()
+_LIQ = {"running": False, "mode": None, "started_at": None,
+        "results": [], "done": True, "ok": None, "error": None}
+
+
+def _liq_reset(mode: str) -> None:
+    with _LIQ_LOCK:
+        _LIQ.update({"running": True, "mode": mode, "started_at": time.time(),
+                     "results": [], "done": False, "ok": None, "error": None})
+
+
+def _liq_add(result: dict) -> None:
+    with _LIQ_LOCK:
+        _LIQ["results"].append(result)
+
+
+def _liq_finish(ok: bool, error: str = "") -> None:
+    with _LIQ_LOCK:
+        _LIQ.update({"running": False, "done": True, "ok": ok, "error": error})
+
+
+@app.get("/api/emergency-to-stablecoin/status")
+def emergency_to_stablecoin_status():
+    with _LIQ_LOCK:
+        return dict(_LIQ)
+
+
 @app.post("/api/emergency-to-stablecoin")
 def emergency_to_stablecoin():
-    """Sell everything to USD cash (paper mode) — the safe stablecoin equivalent."""
+    """Sell everything to stablecoins - runs in the background because the
+    on-chain liquidation does many slow RPC round-trips (wallet read, quote,
+    approve, swap, receipt wait per token). The UI polls the status endpoint
+    for live progress; trading is halted immediately either way."""
+    _invalidate_view_cache()
+    with _LIQ_LOCK:
+        if _LIQ["running"]:
+            return {"ok": False, "started": False,
+                    "error": "a liquidation is already running"}
     c = load_constraints(db)
     c.emergency_stopped = True
     c.trading_paused = True
     db.set_setting("constraints", c.to_json())
+    mode = ("paper" if c.paper_trading
+            else "demo" if c.live_execution_mode == "demo" else "real")
+    _liq_reset(mode)
+    cycle_id = db.start_cycle()
+    import threading
+    threading.Thread(target=_run_liquidation, args=(cycle_id,), daemon=True).start()
+    return {"ok": True, "started": True, "mode": mode}
+
+
+def _run_liquidation(cycle_id: int) -> None:
+    import logging
+    log = logging.getLogger("uvicorn.error")
+    try:
+        c = load_constraints(db)
+        if c.paper_trading:
+            _liq_finish(True)  # placeholder, replaced below
+            return
+        _liquidation_body(c, cycle_id)
+    except Exception as e:
+        log.exception("liquidation failed")
+        try:
+            db.finish_cycle(cycle_id, "emergency", "", "",
+                            summary=f"Liquidation crashed: {e}")
+        except Exception:
+            pass
+        _liq_finish(False, f"internal error: {type(e).__name__}: {e}")
+
+
+def _liquidation_body(c, cycle_id: int) -> None:
+    """Sell everything to stablecoins. Runs in a background thread (the
+    endpoint returns immediately so the UI can poll for live progress);
+    trading is halted before the first token is sold."""
+    if c.paper_trading:
+        try:
+            prices = market.get_prices()
+        except MarketDataError as e:
+            raise HTTPException(503, f"Cannot liquidate: market data unavailable ({e})")
+        db.finish_cycle(cycle_id, "emergency", "", "", summary="Emergency convert to cash")
+        for p in db.get_positions():
+            qty = p["quantity"]
+            price = prices.get(p["asset"], 0.0)
+            proceeds = qty * price
+            pnl = tracker.apply_sell(p["asset"], qty, proceeds)
+            db.add_decision({
+                "cycle_id": cycle_id, "action": "sell", "asset_in": p["asset"],
+                "asset_out": "USD", "amount": qty, "value_usd": proceeds,
+                "pnl_per_trade": pnl, "status": "executed",
+                "reason": "Emergency stop: converted to stablecoin/cash.",
+                "tx_id": f"paper-emergency-{p['asset']}",
+            })
+            _liq_add({"chain": "paper", "symbol": p["asset"], "ok": True,
+                      "target": "USD", "tx_id": f"paper-emergency-{p['asset']}",
+                      "error": ""})
+        _liq_finish(True)
+        return
+
+    if c.live_execution_mode == "demo":
+        from memicoin_core.demowallet import DemoWallet, NATIVE_WRAPPED
+        try:
+            prices = market.get_prices()
+        except MarketDataError as e:
+            db.finish_cycle(cycle_id, "emergency", "", "",
+                            summary=f"Liquidation aborted: market data unavailable ({e})")
+            _liq_finish(False, f"market data unavailable: {e}")
+            return
+        demo = DemoWallet(db)
+        for r in demo.rows():
+            if r["balance"] <= 0 or r["asset"] == "USDC":
+                continue
+            chain = r["chain"]
+            price = prices.get(r["asset"].upper(), 0.0)
+            if price <= 0 and r["is_gas"]:
+                if chain == "arc":
+                    price = 1.0
+                else:
+                    w = NATIVE_WRAPPED.get(chain)
+                    if w:
+                        try:
+                            price = market.get_prices_for_addresses([w]).get(w.lower(), 0.0)
+                        except Exception:
+                            price = 0.0
+            if price <= 0:
+                _liq_add({"chain": chain, "symbol": r["asset"], "ok": False,
+                          "target": "USDC",
+                          "error": "no price available - liquidate manually in Settings 3c"})
+                continue
+            amount = r["balance"]
+            if r["is_gas"]:
+                amount = r["balance"] - demo.per_tx_gas(chain)
+                if amount <= 0:
+                    _liq_add({"chain": chain, "symbol": r["asset"], "ok": False,
+                              "target": "USDC",
+                              "error": "gas balance too small to cover the swap gas itself"})
+                    continue
+            ok, msg = demo.swap(chain, r["asset"], r["contract"], "USDC", "",
+                                amount, price, 1.0)
+            _liq_add({"chain": chain, "symbol": r["asset"], "ok": ok,
+                      "target": "USDC", "error": "" if ok else msg})
+        db.finish_cycle(cycle_id, "emergency", "", "",
+                        summary="Emergency liquidation to stablecoins (demo mode)")
+        _liq_finish(all(r["ok"] for r in _LIQ["results"]) if _LIQ["results"] else True)
+        return
+
+    from memicoin_core.onchain import (EVM_CHAINS, SolanaWallet, EVMWallet,
+                                       SOLANA_USDC_MINT, read_wallet_balances,
+                                       stablecoin_target, build_extra_contracts)
     try:
         prices = market.get_prices()
-    except MarketDataError as e:
-        raise HTTPException(503, f"Cannot liquidate: market data unavailable ({e})")
-    cycle_id = db.start_cycle()
-    db.finish_cycle(cycle_id, "emergency", "", "", summary="Emergency convert to cash")
-    for p in db.get_positions():
-        qty = p["quantity"]
-        price = prices.get(p["asset"], 0.0)
-        proceeds = qty * price
-        pnl = tracker.apply_sell(p["asset"], qty, proceeds)
-        db.add_decision({
-            "cycle_id": cycle_id, "action": "sell", "asset_in": p["asset"], "asset_out": "USD",
-            "amount": qty, "value_usd": proceeds, "pnl_per_trade": pnl,
-            "status": "executed", "reason": "Emergency stop: converted to stablecoin/cash.",
-            "tx_id": f"paper-emergency-{p['asset']}",
-        })
-    return {"ok": True}
+    except MarketDataError:
+        prices = {}
+    # read the wallet WITH the watchlist + discovery contracts (the same
+    # set the portfolio view shows) - without them only the built-in token
+    # list is visible and discovered tokens are silently skipped
+    raw = read_wallet_balances(secrets, extra_contracts=build_extra_contracts(secrets, market))
+    evm = (raw.get("evm") or {}).get("chains") or {}
+    if not evm and not ((raw.get("solana") or {}).get("tokens")):
+        _liq_add({"chain": "-", "symbol": "-", "ok": False, "target": "USDC",
+                  "error": raw.get("error") or "no sellable tokens found in the wallet"})
+    for chain, entry in evm.items():
+        target_addr, target_label = stablecoin_target(chain)
+        if chain in EVM_CHAINS and EVM_CHAINS[chain].get("router"):
+            w = EVMWallet(secrets, chain)
+            for t in entry.get("tokens", []):
+                if t["contract"].lower() == target_addr.lower():
+                    _liq_add({"chain": chain, "symbol": t["symbol"],
+                              "ok": True, "target": target_label,
+                              "error": "already the stablecoin target - nothing to swap"})
+                    continue
+                try:
+                    min_out = w.router_quote_min_out(
+                        t["contract"], target_addr, t["balance"],
+                        c.onchain_slippage_pct)
+                except Exception:
+                    price = prices.get((t["symbol"] or "").upper(), 0.0)
+                    min_out = (t["balance"] * price
+                               * (1.0 - c.onchain_slippage_pct / 100.0)) if price > 0 else None
+                if min_out is not None and (
+                        min_out <= 0
+                        or (target_label == "USDC" and min_out < 0.01)):
+                    _liq_add({"chain": chain, "symbol": t["symbol"],
+                              "ok": True, "target": target_label,
+                              "error": "dust balance - below the DEX swap minimum, skipped"})
+                    continue
+                res = w.swap_exact_tokens_for_tokens(t["contract"], target_addr,
+                                                     t["balance"],
+                                                     min_amount_out=min_out)
+                _liq_add({"chain": chain, "symbol": t["symbol"], "ok": res.ok,
+                          "tx_id": res.tx_id, "target": target_label,
+                          "error": res.error})
+            # native gas token: convert everything above the gas reserve too
+            # (the demo branch already liquidates gas tokens; real mode used
+            # to silently skip the wallet's largest asset)
+            weth = EVM_CHAINS[chain].get("weth")
+            if weth:
+                try:
+                    nat_amt = w.investable_native()
+                except Exception:
+                    nat_amt = 0.0
+                if nat_amt > 0:
+                    try:
+                        nat_min = w.router_quote_min_out(
+                            weth, target_addr, nat_amt,
+                            c.onchain_slippage_pct, cap_to_balance=False)
+                    except Exception:
+                        nat_price = prices.get(
+                            EVM_CHAINS[chain].get("native_symbol", ""), 0.0)
+                        nat_min = (nat_amt * nat_price
+                                   * (1.0 - c.onchain_slippage_pct / 100.0)
+                                   ) if nat_price > 0 else None
+                    if nat_min is None:
+                        _liq_add({"chain": chain,
+                                  "symbol": EVM_CHAINS[chain].get("native_symbol", "NATIVE"),
+                                  "ok": False, "target": target_label,
+                                  "error": "could not quote a slippage bound for the native token"})
+                    elif nat_min > 0 and not (target_label == "USDC" and nat_min < 0.01):
+                        res = w.swap_exact_eth_for_tokens(
+                            target_addr, nat_amt, min_amount_out=nat_min)
+                        _liq_add({"chain": chain,
+                                  "symbol": EVM_CHAINS[chain].get("native_symbol", "NATIVE"),
+                                  "ok": res.ok, "tx_id": res.tx_id,
+                                  "target": target_label, "error": res.error})
+        else:
+            for t in entry.get("tokens", []):
+                _liq_add({"chain": chain, "symbol": t["symbol"], "ok": False,
+                          "target": target_label,
+                          "error": "no DEX router on this chain \u2014 cannot liquidate automatically"})
+    sol = raw.get("solana")
+    if sol and sol.get("tokens"):
+        sw = SolanaWallet(secrets)
+        for t in sol.get("tokens", []):
+            res = sw.swap(t.get("contract", t.get("mint", "")), SOLANA_USDC_MINT,
+                          t.get("balance", 0.0))
+            _liq_add({"chain": "solana", "symbol": t.get("symbol", "?"), "ok": res.ok,
+                      "tx_id": res.tx_id, "target": "USDC", "error": res.error})
+    db.finish_cycle(cycle_id, "emergency", "", "",
+                    summary="Emergency liquidation to stablecoins (real mode)")
+    _liq_finish(all(r["ok"] for r in _LIQ["results"]) if _LIQ["results"] else True)
 
 
 @app.post("/api/resume")
@@ -159,11 +953,166 @@ def resume():
     return {"ok": True}
 
 
-@app.post("/api/reset-paper")
-def reset_paper():
-    """Reset the paper portfolio to the starting capital."""
-    for p in db.get_positions():
-        db.delete_position(p["asset"])
+@app.get("/api/cycles/latest")
+def latest_cycle():
+    rows = db.list_cycles(limit=1)
+    return rows[0] if rows else {}
+
+
+@app.get("/api/setup-status")
+def setup_status():
+    """First-run guidance: which integrations are configured (booleans only)."""
     c = load_constraints(db)
-    db.set_cash(c.starting_capital_usd)
+    mode = "real" if (not c.paper_trading and c.live_execution_mode == "onchain") else "demo"
+    return {
+        "mistral_key": bool(os.environ.get("MISTRAL_API_KEY")) or secrets.has("mistral_api_key"),
+        "wallet": secrets.has("onchain_private_key") or secrets.has("onchain_solana_private_key"),
+        "paper_trading": c.paper_trading,
+        "mode": mode,
+    }
+
+
+class MistralKeyPayload(BaseModel):
+    api_key: str
+
+
+@app.post("/api/mistral-key")
+def set_mistral_key(p: MistralKeyPayload):
+    """Store the Mistral API key encrypted. Never returned afterwards."""
+    key = p.api_key.strip()
+    if not key:
+        secrets.delete("mistral_api_key")
+        return {"ok": True, "configured": False}
+    secrets.set("mistral_api_key", key)
+    return {"ok": True, "configured": True}
+
+
+# ---------- demo wallet ----------
+class DemoRowPayload(BaseModel):
+    chain: str
+    asset: str
+    balance: float
+    contract: str = ""
+    is_gas: bool = False
+    amount_is_usd: bool = False
+
+
+def _demo_price_for(chain: str, asset: str, contract: str, is_gas: bool) -> float:
+    """Live USD price for a demo-wallet asset (mirror of the valuation logic)."""
+    from memicoin_core.demowallet import NATIVE_WRAPPED
+    try:
+        prices = market.get_prices()
+    except MarketDataError:
+        prices = {}
+    p = prices.get(asset.upper(), 0.0)
+    contracts = []
+    wrapped = NATIVE_WRAPPED.get(chain)
+    if is_gas:
+        if chain == "arc":
+            return 1.0
+        if wrapped:
+            contracts.append(wrapped)
+    if contract:
+        contracts.append(contract)
+    if p <= 0 and contracts:
+        try:
+            addr = market.get_prices_for_addresses(contracts)
+            for c in contracts:
+                if addr.get(c.lower(), 0) > 0:
+                    p = addr[c.lower()]
+                    break
+        except MarketDataError:
+            pass
+    if p <= 0 and asset.upper() in ("USDC", "USDT"):
+        p = 1.0
+    return p
+
+
+@app.get("/api/demo-wallet")
+def demo_wallet_rows():
+    from memicoin_core.demowallet import DemoWallet, GAS_COST_PER_TX
+    demo = DemoWallet(db)
+    rows = demo.rows()
+    # value rows at real prices
+    from memicoin_core.demowallet import NATIVE_WRAPPED
+    try:
+        prices = market.get_prices()
+    except MarketDataError:
+        prices = {}
+    contracts = [r["contract"] for r in rows if r.get("contract")]
+    for r in rows:
+        if r["is_gas"] and r["chain"] in NATIVE_WRAPPED and r["chain"] != "arc":
+            contracts.append(NATIVE_WRAPPED[r["chain"]])
+    addr_prices = {}
+    if contracts:
+        try:
+            addr_prices = market.get_prices_for_addresses(contracts)
+        except Exception:
+            addr_prices = {}
+    out = []
+    for r in rows:
+        p = prices.get(r["asset"].upper(), 0.0)
+        if p <= 0 and r.get("contract"):
+            p = addr_prices.get(r["contract"].lower(), 0.0)
+        if p <= 0 and r["is_gas"]:
+            # native coin -> wrapped equivalent (ETH->WETH, etc.); arc USDC -> peg
+            wrapped = NATIVE_WRAPPED.get(r["chain"])
+            if r["chain"] == "arc":
+                p = 1.0
+            elif wrapped:
+                p = addr_prices.get(wrapped.lower(), 0.0)
+        if p <= 0 and r["asset"].upper() in ("USDC", "USDT"):
+            p = 1.0
+        out.append({**r, "price_usd": p, "value_usd": r["balance"] * p})
+    return {"rows": out, "gas_costs": GAS_COST_PER_TX}
+
+
+@app.post("/api/demo-wallet")
+def demo_wallet_set(p: DemoRowPayload):
+    _invalidate_view_cache()
+    if p.balance < 0:
+        raise HTTPException(400, "balance must be >= 0")
+    chain = p.chain.strip().lower()
+    asset = p.asset.strip().upper()
+    balance = p.balance
+    if p.amount_is_usd:
+        # convert the fiat amount to a token quantity at the live price
+        price = _demo_price_for(chain, asset, p.contract.strip(), p.is_gas)
+        if price <= 0:
+            raise HTTPException(400, f"no live price for {asset} on {chain}: "
+                                       "cannot convert a USD amount. Enter the token "
+                                       "quantity instead, or try again in a moment.")
+        balance = p.balance / price
+    db.demo_set(chain, asset, balance, p.contract.strip(), p.is_gas)
+    db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
+    return {"ok": True, "stored_balance": balance,
+            "price_used": (p.balance / balance) if balance else 0}
+
+
+@app.delete("/api/demo-wallet")
+def demo_wallet_delete(chain: str, asset: str, contract: str = ""):
+    _invalidate_view_cache()
+    db.demo_delete(chain.strip().lower(), asset.strip().upper(), contract.strip())
+    db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
     return {"ok": True}
+
+
+@app.post("/api/demo-wallet/clear")
+def demo_wallet_clear():
+    _invalidate_view_cache()
+    db.demo_clear()
+    db.set_setting("pnl_baseline_usd", "")  # wallet changed: re-snapshot
+    return {"ok": True}
+
+
+@app.post("/api/go-demo")
+def go_demo():
+    _invalidate_view_cache()
+    """Switch to demo-wallet mode: real prices and full pipeline, simulated
+    settlement against the user-built demo wallet."""
+    c = load_constraints(db)
+    c.paper_trading = False
+    c.live_execution_mode = "demo"
+    db.set_setting("constraints", c.to_json())
+    db.set_setting("pnl_baseline_usd", "")  # re-snapshot at the first demo cycle
+    return {"ok": True, "mode": "demo"}

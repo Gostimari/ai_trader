@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 
 RiskProfile = Literal["safe", "balanced", "aggressive"]
 AutonomyMode = Literal["constrained", "full_control"]
+# exchange = Mode A (CCXT), onchain = Mode B (imported hot wallet + DEX)
+LiveExecutionMode = Literal["exchange", "onchain", "demo"]
 
 SETTINGS_VERSION = 1
 
@@ -22,20 +24,58 @@ class Constraints(BaseModel):
         default=20.0, ge=0, le=100,
         description="Hard cap on total drawdown in % of starting capital. Required.",
     )
+    per_position_stop_pct: Optional[float] = Field(
+        default=20.0, ge=0,
+        description="Per-position stop-loss: when a single position is down this %, "
+                    "it is sold to cash/USDC automatically at the next cycle. "
+                    "Set 0 to disable.",
+    )
     risk_profile: RiskProfile = "balanced"
     allowed_chains: list[str] = Field(
-        default_factory=lambda: ["solana", "ethereum", "binance-smart-chain", "base", "polygon"]
+        default_factory=lambda: ["solana", "ethereum", "binance-smart-chain", "base", "polygon", "arc"]
     )
     max_position_pct: float = Field(
         default=25.0, gt=0, le=100,
         description="Max % of portfolio value in a single asset.",
+    )
+    min_trade_usd: float = Field(
+        default=1.0, ge=0,
+        description="Dust guard: reject buys below this USD value. Buys are sized in USD.",
+    )
+    onchain_slippage_pct: float = Field(
+        default=5.0, ge=0, le=50,
+        description="Max slippage tolerated on real on-chain swaps (percent). "
+                    "The swap reverts on-chain if the received amount is "
+                    "below the expected amount minus this tolerance.",
+    )
+    onchain_testnet: bool = Field(
+        default=False,
+        description="Testnet mode: real transactions run on Sepolia / Base "
+                    "Sepolia with faucet tokens (no real funds). Use this to "
+                    "verify the on-chain and bridge flows before enabling "
+                    "mainnet. Mainnet chains are refused while ON, and "
+                    "testnet chains are refused while OFF.",
+    )
+    auto_market_expansion: bool = Field(
+        default=True,
+        description="Automatically add freshly launched / boosted tokens "
+                    "(DexScreener public feeds, contracts included) to the "
+                    "tradable universe on the allowed chains, so the AI can "
+                    "trade brand-new coins without the user adding anything. "
+                    "Turn off to trade only the watchlist.",
     )
     autonomy_mode: AutonomyMode = "constrained"
     custom_prompt: str = Field(
         default="", description="Behavioral instructions the AI reads before every decision."
     )
     decision_time_utc: str = "00:00"
+    # Class default is the internal test substrate (paper). The APP default
+    # is demo mode - enforced by load_constraints() migration below, so a
+    # fresh install and legacy paper settings both land on demo.
     paper_trading: bool = True
+    live_execution_mode: LiveExecutionMode = "demo"
+    # chain used for Mode B on-chain swaps (must be in onchain.SUPPORTED_CHAINS)
+    onchain_chain: str = "ethereum"
     starting_capital_usd: float = 100.0
     trading_paused: bool = False
     emergency_stopped: bool = False
@@ -51,6 +91,17 @@ def load_constraints(db) -> Constraints:
     raw = db.get_setting("constraints")
     if raw is None:
         c = Constraints()
+        # fresh install: land on the user-facing default (demo), not the
+        # internal paper test substrate
+        c.paper_trading = False
+        c.live_execution_mode = "demo"
         db.set_setting("constraints", c.to_json())
         return c
-    return Constraints(**{k: v for k, v in raw.items() if k in Constraints.model_fields})
+    c = Constraints(**{k: v for k, v in raw.items() if k in Constraints.model_fields})
+    # two-mode world: the app is demo or real. Paper/exchange are internal
+    # legacy states -> migrate on load.
+    if c.paper_trading or c.live_execution_mode == "exchange":
+        c.paper_trading = False
+        c.live_execution_mode = "demo"
+        db.set_setting("constraints", c.to_json())
+    return c
