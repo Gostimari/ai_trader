@@ -765,6 +765,23 @@ class TestEvmMultiChainImport:
         assert "Paper money" not in html  # paper mode is gone from the UI
 
 
+def _liq_post_and_wait(client):
+    """POST /api/emergency-to-stablecoin (now a background job) and poll the
+    status endpoint until the worker finishes; returns the final status."""
+    import time as _t
+    r = client.post("/api/emergency-to-stablecoin")
+    assert r.status_code == 200
+    started = r.json()
+    assert started.get("started") is True, started
+    for _ in range(200):
+        s = client.get("/api/emergency-to-stablecoin/status").json()
+        if s.get("done"):
+            s.setdefault("mode", started.get("mode"))
+            return s
+        _t.sleep(0.05)
+    raise AssertionError("liquidation did not finish in time")
+
+
 class TestUserTestGaps:
     def test_wallet_balances_endpoint_unconfigured(self, db, monkeypatch):
         import app.server as srv
@@ -819,8 +836,7 @@ class TestUserTestGaps:
                         "tokens": [{"symbol": "CIRBTC", "contract": "0x171", "balance": 1.0}]}
             }}, "solana": None})
         c = TestClient(srv.app)
-        r = c.post("/api/emergency-to-stablecoin")
-        d = r.json()
+        d = _liq_post_and_wait(c)
         assert d["mode"] == "real"
         res = d["results"][0]
         assert res["ok"] is False and "no DEX router" in res["error"]  # honest failure
@@ -906,8 +922,8 @@ class TestStablecoinLiquidationAndKey:
         monkeypatch.setattr(oc, "EVMWallet", _FakeW)
         monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
         c = TestClient(srv.app)
-        r = c.post("/api/emergency-to-stablecoin")
-        res = r.json()["results"][0]
+        d = _liq_post_and_wait(c)
+        res = d["results"][0]
         assert res["ok"] is True and res["target"] == "USDC"
 
     def test_mistral_key_stored_never_returned(self, db, monkeypatch):
@@ -3766,9 +3782,7 @@ class TestEmergencyLiquidation:
         db.demo_set("base", "ETH", 0.02, "", is_gas=True)
         db.demo_set("arc", "USDC", 50.0, "")
         c = TestClient(srv.app)
-        r = c.post("/api/emergency-to-stablecoin")
-        assert r.status_code == 200
-        body = r.json()
+        body = _liq_post_and_wait(c)
         assert body["mode"] == "demo" and body["ok"] is True
         sold = [x for x in body["results"] if x["symbol"] == "ETH"][0]
         assert sold["ok"] is True
@@ -3788,8 +3802,7 @@ class TestEmergencyLiquidation:
         monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
         db.demo_set("base", "BRETT", 1000.0, "0x532f")
         c = TestClient(srv.app)
-        r = c.post("/api/emergency-to-stablecoin")
-        body = r.json()
+        body = _liq_post_and_wait(c)
         assert body["mode"] == "demo" and body["ok"] is False
         assert "no price" in body["results"][0]["error"]
         assert {(x["chain"], x["asset"]): x["balance"] for x in db.demo_rows()}[("base", "BRETT")] == 1000.0
@@ -3826,9 +3839,7 @@ class TestEmergencyLiquidation:
         db.set_setting("constraints", Constraints(
             paper_trading=False, live_execution_mode="onchain").to_json())
         c = TestClient(srv.app)
-        r = c.post("/api/emergency-to-stablecoin")
-        assert r.status_code == 200
-        body = r.json()
+        body = _liq_post_and_wait(c)
         assert body["mode"] == "real" and body["ok"] is True
         assert calls["swap"][3] == 95.0
         assert calls["quote"][3] == 5.0  # default onchain_slippage_pct

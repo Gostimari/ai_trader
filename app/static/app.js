@@ -327,23 +327,45 @@ function controls() {
     if (!confirm("Sell ALL positions and convert to USDC? This cannot be undone.")) return;
     const btn = $("#btn-stable");
     btn.disabled = true;
-    btn.textContent = "Converting\u2026";
+    btn.textContent = "Starting liquidation\u2026";
     try {
       const r = await api("/api/emergency-to-stablecoin", {});
-      const msg = r.mode === "real"
-        ? (r.ok ? "All liquidated to stablecoins."
-                : "Liquidation finished with failures: " +
-                  (r.results || []).filter((x) => !x.ok)
-                    .map((x) => `${x.symbol} on ${x.chain}: ${x.error}`).join("; "))
-        : "All paper positions converted to cash.";
-      alert(msg);
+      if (!r.started) {
+        alert("A liquidation is already running \u2014 watch the status below.");
+      } else {
+        $("#cycle-result").textContent =
+          "\ud83d\udcb5 Liquidation running in the background \u2014 selling all positions to USDC.\n" +
+          "On-chain liquidation reads every wallet, quotes and swaps each token; this can take a few minutes. Progress appears here.";
+        await pollLiquidation();
+      }
     } catch (e) {
-      alert("Liquidation FAILED: " + e.message);
+      alert("Liquidation FAILED to start: " + e.message);
     }
     btn.disabled = false;
     btn.textContent = "\ud83d\udcb5 Convert all to USDC (per chain)";
     loadState(); loadDecisions();
   });
+
+  async function pollLiquidation() {
+    for (let i = 0; i < 450; i++) {
+      await new Promise((res) => setTimeout(res, 2000));
+      let s;
+      try { s = await api("/api/emergency-to-stablecoin/status"); }
+      catch (e) { continue; }
+      const lines = (s.results || []).map((x) =>
+        `${x.ok ? "\u2705" : "\u274c"} ${x.symbol} on ${x.chain} \u2192 ${x.target}${x.error ? " \u2014 " + x.error : ""}`);
+      $("#cycle-result").textContent =
+        `\ud83d\udcb5 Liquidation ${s.done ? "finished" : "running\u2026"} (${(s.results || []).length} result(s))\n` +
+        (lines.length ? lines.join("\n") : "Working \u2014 reading wallets and quoting swaps\u2026");
+      if (s.done) {
+        pushCycleNotif(!!s.ok, s.ok
+          ? "Liquidation to USDC finished successfully."
+          : "Liquidation finished with failures \u2014 see the status panel / Decision Feed." + (s.error ? " " + s.error : ""));
+        return;
+      }
+    }
+    pushCycleNotif(false, "Liquidation status check timed out \u2014 check the Decision Feed.");
+  }
   $("#btn-resume").addEventListener("click", async () => {
     if (confirm("Re-enable trading after emergency stop/pause?")) { await api("/api/resume", {}); loadState(); }
   });
