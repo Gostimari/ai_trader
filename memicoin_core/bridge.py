@@ -22,7 +22,7 @@ import os
 import time
 from dataclasses import dataclass
 
-from .onchain import EVMWallet, USDC_ADDRESSES
+from .onchain import EVMWallet, USDC_ADDRESSES, _checksum
 
 log = logging.getLogger("memicoin.bridge")
 
@@ -161,7 +161,7 @@ def _send_with_fallback_gas(w: EVMWallet, to: str, data: bytes,
         addr = w.address()
         tx = {
             "from": addr,
-            "to": w.w3.to_checksum_address(to),
+            "to": _checksum(to),
             "data": data,
             "value": value_wei,
             "nonce": w.w3.eth.get_transaction_count(addr),
@@ -227,7 +227,7 @@ def _mint_on_destination(secrets, dst_chain: str, message_bytes: bytes,
     if not w.configured():
         raise RuntimeError("EVM wallet key not imported")
     contract = w.w3.eth.contract(
-        address=w.w3.to_checksum_address(transmitter_for(dst_chain)),
+        address=_checksum(transmitter_for(dst_chain)),
         abi=RECEIVE_MESSAGE_ABI)
     att = attestation[2:] if attestation.startswith("0x") else attestation
     data = contract.encode_abi("receiveMessage", args=[
@@ -263,13 +263,13 @@ def bridge_usdc(secrets, src_chain: str, dst_chain: str, amount: float,
         w.erc20_approve_if_needed(burn_token, messenger, raw_amount)
         mint_recipient = bytes.fromhex(w.address()[2:].rjust(64, "0"))
         contract = w.w3.eth.contract(
-            address=w.w3.to_checksum_address(messenger),
+            address=_checksum(messenger),
             abi=DEPOSIT_FOR_BURN_ABI)
         data = contract.encode_abi("depositForBurn", args=[
             raw_amount,
             CCTP_DOMAINS[dst_chain],
             mint_recipient,
-            w.w3.to_checksum_address(burn_token),
+            _checksum(burn_token),
             b"\x00" * 32,  # destinationCaller 0x0: anyone can complete the mint
             0,  # maxFee in burn-token units; 0 = standard (no fast-fee premium)
             _min_finality_threshold(src_chain),

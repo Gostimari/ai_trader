@@ -2194,6 +2194,24 @@ class TestGasFeasibility:
                 if addr:
                     assert Web3.is_checksum_address(addr), (chain, key, addr)
 
+    def test_all_onchain_constants_are_checksum_valid(self):
+        # regression: every address the app sends funds to or calls must be
+        # properly EIP-55 checksummed - a wrong-cased constant crashes swaps
+        # with "invalid EIP-55 checksum" before anything is broadcast
+        from web3 import Web3
+        from memicoin_core.onchain import EVM_CHAINS, USDC_ADDRESSES
+        from memicoin_core import bridge as B
+        addrs = []
+        for cfg in EVM_CHAINS.values():
+            addrs += [cfg.get("router"), cfg.get("weth")]
+        addrs += list(USDC_ADDRESSES.values())
+        addrs += [B.TOKEN_MESSENGER_V2, B.MESSAGE_TRANSMITTER_V2,
+                  B.TOKEN_MESSENGER_V2_TESTNET, B.MESSAGE_TRANSMITTER_V2_TESTNET,
+                  B.ARC_CCTP_BURN_TOKEN]
+        for a in addrs:
+            if a:
+                assert Web3.is_checksum_address(a), a
+
     def test_checksum_helper_tolerates_any_casing(self):
         # regression: a wrong-cased router constant crashed every swap with
         # "Address has an invalid EIP-55 checksum"; _checksum() must accept
