@@ -822,6 +822,54 @@ class TestUserTestGaps:
         assert arc[0]["symbol"] == "USDC" and arc[0]["value_usd"] == pytest.approx(12.0)
         assert arc[1]["symbol"] == "CIRBTC" and arc[1]["value_usd"] == pytest.approx(166000.0)
 
+    def test_emergency_real_mode_liquidates_discovered_tokens(self, db, monkeypatch):
+        """Regression: the real-mode liquidation read the wallet WITHOUT the
+        watchlist/discovery contracts, so only built-in tokens were visible -
+        the user's Convert-all-to-USDC reported '0 result(s)' for a wallet
+        holding DEGEN/BRETT (found only via discovery)."""
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        import memicoin_core.onchain as oc
+        DEGEN = "0x" + "de" * 20
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has",
+                            lambda k: k == "onchain_private_key")
+        c0 = load_constraints(db)
+        c0.paper_trading = False
+        c0.live_execution_mode = "onchain"
+        db.set_setting("constraints", c0.to_json())
+        monkeypatch.setattr(oc, "build_extra_contracts",
+                            lambda s, m: {"base": [{"address": DEGEN, "symbol": "DEGEN"}]})
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                            lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0.0,
+                         "tokens": [{"symbol": "DEGEN", "contract": DEGEN,
+                                     "balance": 37.0}]}}},
+            "solana": None})
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {"USDC": 1.0})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        calls = []
+
+        class _FakeW:
+            def __init__(self, s, c):
+                self.cfg = {"router": "0xr", "weth": "0xw", "chain_id": 8453}
+            def router_quote_min_out(self, tin, tout, amt, slip_pct):
+                return amt * (1 - slip_pct / 100)
+            def swap_exact_tokens_for_tokens(self, tin, tout, amt, min_amount_out=None):
+                calls.append((tin, tout, amt))
+                from memicoin_core.onchain import TxResult
+                return TxResult(True, tx_id="0xliq")
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        c = TestClient(srv.app)
+        d = _liq_post_and_wait(c)
+        assert d["mode"] == "real"
+        assert len(d["results"]) == 1
+        res = d["results"][0]
+        assert res["ok"] is True and res["symbol"] == "DEGEN"
+        assert calls == [("0x" + "de" * 20,
+                          "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 37.0)]
+
     def test_emergency_real_mode_reports_unliquidatable(self, db, monkeypatch):
         import app.server as srv
         from fastapi.testclient import TestClient
@@ -912,7 +960,7 @@ class TestStablecoinLiquidationAndKey:
         c0.paper_trading = False
         c0.live_execution_mode = "onchain"
         db.set_setting("constraints", c0.to_json())
-        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None: {
+        monkeypatch.setattr(oc, "read_wallet_balances", lambda s, chains=None, extra_contracts=None: {
             "evm": {"address": "0xabc", "chains": {
                 "ethereum": {"native_symbol": "ETH", "native": 0.0,
                              "tokens": [{"symbol": "PEPE", "contract": "0x698250814c", "balance": 100.0}]}
@@ -930,6 +978,53 @@ class TestStablecoinLiquidationAndKey:
         d = _liq_post_and_wait(c)
         res = d["results"][0]
         assert res["ok"] is True and res["target"] == "USDC"
+
+    def test_emergency_real_mode_liquidates_discovered_tokens(self, db, monkeypatch):
+        """Regression: the real-mode liquidation read the wallet WITHOUT the
+        watchlist/discovery contracts, so only built-in tokens were visible -
+        the user's Convert-all-to-USDC reported '0 result(s)' for a wallet
+        holding DEGEN/BRETT (found only via discovery)."""
+        import app.server as srv
+        from fastapi.testclient import TestClient
+        import memicoin_core.onchain as oc
+        DEGEN = "0x" + "de" * 20
+        monkeypatch.setattr(srv, "db", db)
+        monkeypatch.setattr(srv.secrets, "has",
+                            lambda k: k == "onchain_private_key")
+        c0 = load_constraints(db)
+        c0.paper_trading = False
+        c0.live_execution_mode = "onchain"
+        db.set_setting("constraints", c0.to_json())
+        monkeypatch.setattr(oc, "build_extra_contracts",
+                            lambda s, m: {"base": [{"address": DEGEN, "symbol": "DEGEN"}]})
+        monkeypatch.setattr(oc, "read_wallet_balances",
+                            lambda s, chains=None, extra_contracts=None: {
+            "evm": {"address": "0xabc", "chains": {
+                "base": {"native_symbol": "ETH", "native": 0.0,
+                         "tokens": [{"symbol": "DEGEN", "contract": DEGEN, "balance": 37.0}]}}},
+            "solana": None})
+        monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {"USDC": 1.0})
+        monkeypatch.setattr(srv.market, "get_asset_map", lambda force=False: {})
+        calls = []
+
+        class _FakeW:
+            def __init__(self, s, c):
+                self.cfg = {"router": "0xr", "weth": "0xw", "chain_id": 8453}
+            def router_quote_min_out(self, tin, tout, amt, slip_pct):
+                return amt * (1 - slip_pct / 100)
+            def swap_exact_tokens_for_tokens(self, tin, tout, amt, min_amount_out=None):
+                calls.append((tin, tout, amt))
+                from memicoin_core.onchain import TxResult
+                return TxResult(True, tx_id="0xliq")
+        monkeypatch.setattr(oc, "EVMWallet", _FakeW)
+        c = TestClient(srv.app)
+        d = _liq_post_and_wait(c)
+        assert d["mode"] == "real"
+        assert len(d["results"]) == 1
+        res = d["results"][0]
+        assert res["ok"] is True and res["symbol"] == "DEGEN"
+        assert calls == [("0x" + "de" * 20,
+                          "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 37.0)]
 
     def test_mistral_key_stored_never_returned(self, db, monkeypatch):
         import app.server as srv
@@ -3822,7 +3917,9 @@ class TestEmergencyLiquidation:
         from fastapi.testclient import TestClient
         monkeypatch.setattr(srv, "db", db)
         monkeypatch.setattr(srv.market, "get_prices", lambda force=False: {})
-        monkeypatch.setattr(onchain, "read_wallet_balances", lambda secrets: {
+        monkeypatch.setattr(onchain, "build_extra_contracts", lambda s, m: {})
+        monkeypatch.setattr(onchain, "read_wallet_balances",
+                            lambda secrets, chains=None, extra_contracts=None: {
             "evm": {"chains": {"base": {"tokens": [
                 {"contract": "0xabc", "symbol": "BRETT", "balance": 100.0}]}}},
             "solana": None})

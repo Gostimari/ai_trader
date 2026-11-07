@@ -850,13 +850,19 @@ def _liquidation_body(c, cycle_id: int) -> None:
 
     from memicoin_core.onchain import (EVM_CHAINS, SolanaWallet, EVMWallet,
                                        SOLANA_USDC_MINT, read_wallet_balances,
-                                       stablecoin_target)
+                                       stablecoin_target, build_extra_contracts)
     try:
         prices = market.get_prices()
     except MarketDataError:
         prices = {}
-    raw = read_wallet_balances(secrets)
+    # read the wallet WITH the watchlist + discovery contracts (the same
+    # set the portfolio view shows) - without them only the built-in token
+    # list is visible and discovered tokens are silently skipped
+    raw = read_wallet_balances(secrets, extra_contracts=build_extra_contracts(secrets, market))
     evm = (raw.get("evm") or {}).get("chains") or {}
+    if not evm and not ((raw.get("solana") or {}).get("tokens")):
+        _liq_add({"chain": "-", "symbol": "-", "ok": False, "target": "USDC",
+                  "error": raw.get("error") or "no sellable tokens found in the wallet"})
     for chain, entry in evm.items():
         target_addr, target_label = stablecoin_target(chain)
         if chain in EVM_CHAINS and EVM_CHAINS[chain].get("router"):
