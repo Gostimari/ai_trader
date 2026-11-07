@@ -4898,6 +4898,120 @@ class TestSwapRawAmountCappedAtBalance:
         assert min_out > 0
 
 
+class TestPairLiquidityPreFlight:
+    """Regression: ArcSwap (arc) launched with allPairsLength() = 0 - every
+    swap broadcast into it reverted on-chain and burned gas. Swaps now
+    pre-flight every path hop (pair exists AND holds reserves) and refuse
+    definitively unfillable routes BEFORE broadcasting."""
+
+    ROUTER = None
+    FACTORY = None
+    PAIR = None
+
+    def _wallet(self, pair_addr="0x" + "dd" * 20, reserves=(10 ** 18, 10 ** 18, 0),
+                factory_raises=False):
+        from memicoin_core.onchain import EVMWallet
+        from unittest.mock import MagicMock
+        from web3 import Web3
+        router = Web3.to_checksum_address("0x" + "bb" * 20)
+        factory = Web3.to_checksum_address("0x" + "cc" * 20)
+        pair = Web3.to_checksum_address(pair_addr)
+        weth = Web3.to_checksum_address("0x" + "aa" * 20)
+        w = EVMWallet.__new__(EVMWallet)
+        w.chain = "base"
+        w.cfg = {"chain_id": 8453, "router": router, "weth": weth}
+        w._acct = None
+        w.address = lambda: Web3.to_checksum_address("0x" + "a" * 40)
+        state = {"swap_args": None, "approves": 0, "sends": 0}
+
+        router_c = MagicMock()
+        if factory_raises:
+            router_c.functions.factory.side_effect = RuntimeError("rpc down")
+        else:
+            router_c.functions.factory.return_value.call.return_value = factory
+        router_c.functions.WETH.return_value.call.return_value = bytes.fromhex(weth[2:])
+        router_c.encode_abi.side_effect = lambda name, args: (
+            state.__setitem__("swap_args", list(args)), b"0xdata")[1]
+
+        factory_c = MagicMock()
+        factory_c.functions.getPair.return_value.call.return_value = pair
+
+        pair_c = MagicMock()
+        pair_c.functions.getReserves.return_value.call.return_value = reserves
+
+        token_fns = MagicMock()
+        token_fns.balanceOf.return_value.call.return_value = 10 ** 18
+        token_fns.allowance.return_value.call.return_value = 2 ** 256 - 1
+        token_fns.approve.return_value.encode_abi.side_effect = (
+            lambda *a, **k: state.__setitem__("approves", state["approves"] + 1) or b"0xappr")
+
+        def contract(address=None, abi=None):
+            if address == router:
+                return router_c
+            if address == factory:
+                return factory_c
+            if address == pair:
+                return pair_c
+            c = MagicMock()
+            c.functions = token_fns
+            return c
+        w.w3 = MagicMock()
+        w.w3.eth.contract.side_effect = contract
+        w.w3.eth.get_code.return_value = b"\x60\x80"
+        w._erc20_decimals = lambda t: 18
+        w._retry_on_rpc_failure = lambda f: f()
+        w._base_tx = lambda to, data, value=0: {"to": to, "data": data}
+        w._send = lambda tx: state.__setitem__("sends", state["sends"] + 1) or "0xdeadbeef"
+        w._state = state
+        return w
+
+    def test_swap_refuses_missing_pair_before_spending_gas(self):
+        from memicoin_core.onchain import TxResult
+        w = self._wallet(pair_addr="0x" + "00" * 20)
+        r = w.swap_exact_tokens_for_tokens(
+            "0x" + "11" * 20, "0x" + "22" * 20, 1.0, min_amount_out=0.9)
+        assert not r.ok
+        assert "no DEX pair exists yet" in r.error
+        assert w._state["approves"] == 0, "no approve may be sent for an unfillable swap"
+        assert w._state["sends"] == 0 and w._state["swap_args"] is None
+
+    def test_swap_refuses_pair_without_reserves(self):
+        w = self._wallet(reserves=(0, 0, 0))
+        r = w.swap_exact_tokens_for_tokens(
+            "0x" + "11" * 20, "0x" + "22" * 20, 1.0, min_amount_out=0.9)
+        assert not r.ok
+        assert "holds no liquidity" in r.error
+        assert w._state["sends"] == 0
+
+    def test_swap_proceeds_when_pair_has_liquidity(self):
+        w = self._wallet()
+        r = w.swap_exact_tokens_for_tokens(
+            "0x" + "11" * 20, "0x" + "22" * 20, 1.0, min_amount_out=0.9)
+        assert r.ok, r.error
+        assert w._state["swap_args"] is not None
+        assert w._state["sends"] == 1
+
+    def test_native_swap_refuses_missing_pair(self):
+        w = self._wallet(pair_addr="0x" + "00" * 20)
+        w.investable_native = lambda: 1.0
+        w.gas_reserve = lambda: 0.0
+        r = w.swap_exact_eth_for_tokens("0x" + "22" * 20, 0.5,
+                                        min_amount_out=1.0)
+        assert not r.ok
+        assert "no DEX pair exists yet" in r.error
+        assert w._state["sends"] == 0
+
+    def test_indeterminate_liquidity_check_proceeds(self):
+        """RPC trouble during the pre-check must not block trading - a
+        missing pair wastes gas, it cannot lose funds, so the check is
+        deliberately NOT fail-closed (unlike verify_router)."""
+        w = self._wallet(factory_raises=True)
+        r = w.swap_exact_tokens_for_tokens(
+            "0x" + "11" * 20, "0x" + "22" * 20, 1.0, min_amount_out=0.9)
+        assert r.ok, r.error
+        assert w._state["sends"] == 1
+
+
 class TestArcBuyRouting:
     def test_arc_buy_routes_through_usdc_token_swap(self, db, monkeypatch):
         import memicoin_core.onchain as oc

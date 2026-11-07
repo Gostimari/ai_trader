@@ -372,6 +372,62 @@ class EVMWallet:
             return [tin, tout]
         return [tin, w, tout]
 
+    def _pair_liquidity_ok(self, path: list[str]) -> tuple[bool, str]:
+        """Pre-flight: every hop of the swap path must be a LIVE pair with
+        non-zero reserves, otherwise the swap reverts ON-CHAIN and burns gas
+        (ArcSwap launched with allPairsLength() = 0 - every swap into it
+        reverted). A definitive missing/empty pair refuses the swap before
+        broadcasting. An indeterminate check (RPC trouble) proceeds: a
+        missing pair can only waste gas, never lose funds, so unlike
+        verify_router this check is not fail-closed."""
+        abi = [{"constant": True, "inputs": [], "name": "factory",
+                "outputs": [{"name": "", "type": "address"}],
+                "type": "function"},
+               {"constant": True,
+                "inputs": [{"name": "tokenA", "type": "address"},
+                           {"name": "tokenB", "type": "address"}],
+                "name": "getPair",
+                "outputs": [{"name": "", "type": "address"}],
+                "type": "function"},
+               {"constant": True, "inputs": [], "name": "getReserves",
+                "outputs": [{"name": "_reserve0", "type": "uint112"},
+                            {"name": "_reserve1", "type": "uint112"},
+                            {"name": "_blockTimestampLast", "type": "uint32"}],
+                "type": "function"}]
+        try:
+            router = self._router()
+            rc = self.w3.eth.contract(address=_checksum(router), abi=abi)
+            factory = self._retry_on_rpc_failure(
+                lambda: rc.functions.factory().call())
+            if isinstance(factory, (bytes, bytearray)):
+                factory = "0x" + bytes(factory[-20:]).hex()
+            fc = self.w3.eth.contract(address=_checksum(factory), abi=abi)
+            for a, b in zip(path, path[1:]):
+                pair = self._retry_on_rpc_failure(
+                    lambda a=a, b=b: fc.functions.getPair(
+                        _checksum(a), _checksum(b)).call())
+                if isinstance(pair, (bytes, bytearray)):
+                    pair = "0x" + bytes(pair[-20:]).hex()
+                if not pair or int(str(pair), 16) == 0:
+                    return False, (
+                        f"no DEX pair exists yet on {self.chain} for this "
+                        f"route ({a[:10]}.. -> {b[:10]}..) - the DEX has no "
+                        f"liquidity, refusing to burn gas on a swap that "
+                        f"cannot fill")
+                pc = self.w3.eth.contract(address=_checksum(pair), abi=abi)
+                r0, r1, _ = self._retry_on_rpc_failure(
+                    lambda: pc.functions.getReserves().call())
+                if r0 <= 0 or r1 <= 0:
+                    return False, (
+                        f"the DEX pair on {self.chain} for this route "
+                        f"({a[:10]}.. -> {b[:10]}..) exists but holds no "
+                        f"liquidity - refusing to burn gas on a swap that "
+                        f"cannot fill")
+        except Exception as e:
+            log.warning("pair liquidity pre-check unavailable on %s: %s",
+                        self.chain, e)
+        return True, ""
+
     def router_quote_min_out(self, token_in: str, token_out: str,
                              amount_in: float, slippage_pct: float,
                              cap_to_balance: bool = True) -> float:
@@ -427,6 +483,10 @@ class EVMWallet:
                 return TxResult(False, error=(
                     f"on-chain balance of {token_in} is zero or dust - "
                     f"nothing to swap"))
+            path = self._swap_path(token_in, token_out)
+            liq_ok, liq_why = self._pair_liquidity_ok(path)
+            if not liq_ok:
+                return TxResult(False, error=liq_why)
             self.erc20_approve_if_needed(token_in, router, raw_in)
             dec_out = self._erc20_decimals(token_out)
             raw_min = max(1, int(min_amount_out * 10 ** dec_out))
@@ -441,7 +501,6 @@ class EVMWallet:
                     "type": "function"}]
             import time
             deadline = int(time.time()) + 1200
-            path = self._swap_path(token_in, token_out)
             router_c = self.w3.eth.contract(
                 address=_checksum(router), abi=abi)
             data = router_c.encode_abi(
@@ -528,6 +587,10 @@ class EVMWallet:
                     f"its DEX takes no native value - buys must route "
                     f"through the chain's stablecoin contract instead"))
             self.verify_router(router)
+            path = [_checksum(weth), _checksum(token_out)]
+            liq_ok, liq_why = self._pair_liquidity_ok(path)
+            if not liq_ok:
+                return TxResult(False, error=liq_why)
             dec_out = self._erc20_decimals(token_out)
             raw_min = max(1, int(min_amount_out * 10 ** dec_out))
             abi = [{"constant": False,
@@ -540,7 +603,6 @@ class EVMWallet:
                     "type": "function"}]
             import time
             deadline = int(time.time()) + 1200
-            path = [_checksum(weth), _checksum(token_out)]
             router_c = self.w3.eth.contract(
                 address=_checksum(router), abi=abi)
             data = router_c.encode_abi("swapExactETHForTokens",
